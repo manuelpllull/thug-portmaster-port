@@ -34,6 +34,7 @@
 // --- Runtime Globals ---
 unsigned int vgl_framecount = 0;
 bool g_hasJustEnteredNetworkGame = false;
+bool gbQuit = false;
 int sceLibcHeapSize = 4 * 1024 * 1024;
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 int sceUserMainThreadStackSize = 4 * 1024 * 1024;
@@ -136,14 +137,25 @@ int vglInitExtended(int flags, int width, int height, int ram_sz, int msaa)
     s_gl_ctx = SDL_GL_CreateContext(s_window);
     if (!s_gl_ctx)
     {
-        printf("[SDL] Failed to create GL context: %s\n", SDL_GetError());
-        return -1;
+        printf("[SDL] Failed to create default GL context: %s, trying GLES2...\n", SDL_GetError());
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        s_gl_ctx = SDL_GL_CreateContext(s_window);
+        if (!s_gl_ctx)
+        {
+            printf("[SDL] Failed to create GL context: %s\n", SDL_GetError());
+            return -1;
+        }
     }
 
+    SDL_GL_MakeCurrent(s_window, s_gl_ctx);
     SDL_GL_SetSwapInterval(1);
     SDL_ShowCursor(SDL_DISABLE);
 
-    printf("[GL] Initialized: %s, Renderer: %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
+    const char *gl_ver = (const char *)glGetString(GL_VERSION);
+    const char *gl_ren = (const char *)glGetString(GL_RENDERER);
+    printf("[GL] Initialized: %s, Renderer: %s\n", gl_ver ? gl_ver : "unknown", gl_ren ? gl_ren : "unknown");
 
     // Open first connected gamepad
     for (int i = 0; i < SDL_NumJoysticks(); i++)

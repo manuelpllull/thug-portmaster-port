@@ -181,14 +181,7 @@ _ZN3Tmr14GetRenderFrameEv:
 
 
 
-	.global gbQuit
-	.thumb_func
-	.type gbQuit, %function
-gbQuit:
-	movs	r0, #0
-	vmov	s0, r0
-	bx	lr
-	.size gbQuit, .-gbQuit
+@ gbQuit defined in portmaster_platform.cpp
 
 	.global gun_fired
 	.thumb_func
