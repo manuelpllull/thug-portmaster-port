@@ -455,7 +455,7 @@ bool g_vita_var_hash = true;
 #define VAR_HASH_N 2048		// puissance de 2, > 3 x MAX_VARIANTES
 static short s_var_hash[VAR_HASH_N];
 static int   s_vh_recherches = 0, s_vh_sondes = 0, s_vh_poses_vs = 0;
-static int   s_vh_poses_evitees = 0;		// issue #69, « vpr »
+static int   s_vh_poses_evitees = 0;		// issue #69,  vpr 
 static inline unsigned int var_hash_pos( uint32 k )
 {
 	return ( k * 2654435761u ) >> ( 32 - 11 );		// 11 bits : VAR_HASH_N
@@ -1656,6 +1656,7 @@ void ShaderRigideEclaireFin()
 // (programmes, uniformes) : c'est GxmMateriauFin.
 
 
+#ifdef VITA_GXM
 extern "C"
 {
 	extern SceGxmContext       *gxm_context;
@@ -1694,14 +1695,14 @@ struct SGxmVariante
 	const SceGxmProgramParameter *pFogP, *pFogC;
 };
 
-// « gxd 0/1 » : lots opaques par le chemin GXM direct.
+//  gxd 0/1  : lots opaques par le chemin GXM direct.
 bool g_vita_gxm_direct = true;
 
 static unsigned char s_bin[64 * 1024];
 
 // Binaire vitaGL d'un shader -> SceGxmProgram enregistre aupres du patcher.
 // Le binaire vitaGL est un en-tete (uniformes matrices, ...) suivi du
-// programme GXM, qui commence par la signature « GXP\0 ».
+// programme GXM, qui commence par la signature  GXP\0 .
 static SceGxmProgram *programme_gxm( GLuint sh, SceGxmShaderPatcherId *p_id )
 {
 	GLsizei n = 0;
@@ -1731,7 +1732,7 @@ static SceGxmProgram *programme_gxm( GLuint sh, SceGxmShaderPatcherId *p_id )
 	return p;
 }
 
-// « vpr 0/1 » (issue #69) : programme de sommets PARTAGE entre variantes.
+//  vpr 0/1  (issue #69) : programme de sommets PARTAGE entre variantes.
 // Le vertex shader vitaGL est deja unique par (passes, reflet, wibble)
 // (vertex_shader_m, s_vs_m), mais chaque variante en tirait SA copie du
 // binaire GXP, enregistree a part : autant d'identifiants, donc de
@@ -1741,7 +1742,7 @@ static SceGxmProgram *programme_gxm( GLuint sh, SceGxmShaderPatcherId *p_id )
 // de sommets par vs_gl. Memes passes et meme reflet => memes attributs et
 // memes flux (calcules ci-dessous a l'identique), donc le programme cree
 // pour la premiere variante convient a toutes. Les variantes creees avec
-// « vpr 0 » gardent leur copie (comportement d'avant).
+//  vpr 0  gardent leur copie (comportement d'avant).
 bool g_vita_vpr = true;
 struct SVsPartage
 {
@@ -2038,7 +2039,7 @@ static inline void poser_variante_e( SGxmEtat *E, SGxmVariante *g, const SceGxmF
 	const bool fog_ok = ( E->fog_noir == noir ) && ( E->fog_gen == s_fog_gen );
 	if(( g == E->cour ) && fog_ok )
 		return;
-	// Issue #69 (« vpr ») : autre variante, MEME programme de sommets (voir
+	// Issue #69 ( vpr ) : autre variante, MEME programme de sommets (voir
 	// gxm_variante). Le contexte a deja ce programme, et le tampon d'uniformes
 	// de sommets reserve pour E->cour contient exactement ce que g y mettrait :
 	// meme programme donc memes emplacements, meme matrice (E->mvp, change
@@ -2046,7 +2047,7 @@ static inline void poser_variante_e( SGxmEtat *E, SGxmVariante *g, const SceGxmF
 	// brouillard (fog_ok). Tout ce qui pose un autre programme ou reserve un
 	// autre tampon remet E->cour a NULL (GxmMateriauDebut/Fin, GxmPeauDebut,
 	// GxmListeDebut, diff_fin_executer) : E->cour non nul garantit que l'etat
-	// est encore le sien -- la meme garantie que le saut « g == E->cour »
+	// est encore le sien -- la meme garantie que le saut  g == E->cour 
 	// ci-dessus. Variantes a reflet / wibble exclues : leur tampon est pose
 	// par dessin (poser_uniformes_env_e).
 	const bool meme_vp = g_vita_vpr && E->cour && ( E->cour->vp == g->vp )
@@ -2407,7 +2408,7 @@ void GxmMateriauFin()
 
 // --- Personnages en GXM direct (issue #18) ----------------------------------
 //
-// [MESURE] V1 : sauter le dessin des modeles (« mdl 0 ») fait passer la phase
+// [MESURE] V1 : sauter le dessin des modeles ( mdl 0 ) fait passer la phase
 // logique de 7,0 a 4,2 ms. Le skinning est deja sur le GPU : ce qui coute est
 // la soumission par vitaGL -- 192 float4 d'os recopies dans le tampon
 // d'uniformes a CHAQUE glDrawElements, plus programme, attributs et uniformes
@@ -2591,7 +2592,7 @@ bool GxmPeauEclaireePret()
 // (meme squelette, meme matrice) : ecrire 55 os dans la memoire GPU non cachee
 // coute ~25 us (mesure), et un skater a 9 geoms. Valable seulement si
 // personne n'a dessine entre-temps : vitaGL remet a faux ses drapeaux
-// « dirty » des qu'il dessine, et GxmPeauFin les laisse tous a vrai.
+//  dirty  des qu'il dessine, et GxmPeauFin les laisse tous a vrai.
 static const float *sp_gp_os_der = NULL;
 static int          s_gp_n_der = -1;
 static float        s_gp_mvp_der[16];
@@ -2682,7 +2683,7 @@ void GxmPeauDebut( const float *mvp, const float *p_os, int num_os, bool remplir
 	s_gp_image_der = vgl_framecount;
 	memcpy( s_gp_mvp_der, mvp, sizeof( s_gp_mvp_der ));
 	// Un tampon rempli partiellement ne vaut que pour un maillage qui n'a pas
-	// besoin du reste : on ne le reutilise pas pour un « remplir ».
+	// besoin du reste : on ne le reutilise pas pour un  remplir .
 	s_gp_ub_ok = !remplir_os;
 }
 
@@ -2984,7 +2985,7 @@ void GxmTravFin( void )
 	}
 }
 
-// Etape 0 (« gcl ») : les dessins GXM suivants du thread principal sont
+// Etape 0 ( gcl ) : les dessins GXM suivants du thread principal sont
 // enregistres dans une liste, executee a GxmListeFin.
 static bool s_liste_ouverte = false;
 static SceGxmContext *sp_ctx_imm = NULL;
@@ -3021,6 +3022,32 @@ void GxmListeFin( void )
 	gxm_context = sp_ctx_imm;
 	diff_fin_executer( &s_diff0 );
 }
+#else
+static unsigned int s_fog_gen = 1;
+bool g_vita_gxm_direct = false;
+bool g_vita_listes_gxm = false;
+bool g_vita_lots_mt = false;
+
+void GxmMateriauDebut( const float *mvp ) {}
+int  GxmFamilleMelange( unsigned int blend, bool translucide ) { return 0; }
+bool GxmMateriauLot( const SShaderMateriau *p, SceGxmTexture *const *p_tex,
+                     const int *p_first, const int *p_count, int n_plages,
+                     unsigned int ibo, int famille ) { return false; }
+void *GxmMateriauPreparer( const SShaderMateriau *p, SceGxmTexture *const *p_tex,
+                           int first, int count, unsigned int ibo, int famille ) { return NULL; }
+void  GxmMateriauLotPre( void *p_pre ) {}
+void  GxmMateriauLibererPre( void *p_pre ) {}
+void GxmMateriauVue( const float *view ) {}
+bool GxmMateriauMaillage( const SShaderMateriau *p, SceGxmTexture *const *p_tex,
+                          unsigned int ibo, int num_indices, int famille ) { return false; }
+void GxmMateriauFin() {}
+bool GxmListeDebut( void ) { return false; }
+void GxmListeFin( void ) {}
+bool GxmListeOuverte( void ) { return false; }
+bool GxmTravDebut( const float *mvp, const float *vue ) { return false; }
+bool GxmTravPousser( void *p_pre ) { return false; }
+void GxmTravFin( void ) {}
+#endif
 
 
 // --- Brouillard (issue #45) --------------------------------------------------

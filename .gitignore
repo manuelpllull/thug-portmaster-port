@@ -64,3 +64,6 @@ vita/tools/vita_ip.txt
 vita/sce_sys/*.png
 vita/sce_sys/livearea/contents/*.png
 vita/boot/
+
+# PortMaster build artifacts
+build-armhf/

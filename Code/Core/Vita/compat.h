@@ -19,6 +19,8 @@
 #include <stdlib.h>
 #include <malloc.h>
 #include <errno.h>
+#include <stdint.h>
+#include <limits.h>
 
 // -- MSVC-ismes -------------------------------------------------------------
 #ifndef __forceinline
