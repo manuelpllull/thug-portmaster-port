@@ -26,6 +26,10 @@
 #include "vita_log.h"
 #include "p_NxSprite.h"
 #include "p_NxTexture.h"
+#ifdef PORTMASTER
+#include <string.h>
+#include "p_gamma.h"
+#endif
 
 // Espace de coordonnees du moteur pour le 2D.
 // L'espace logique fait 640 x 480, PAS 640 x 448.
@@ -164,9 +168,31 @@ void RenderSprites2D( float bas, float haut )
 
 	// Projection orthographique en coordonnees ecran, origine en haut a
 	// gauche -- c'est la convention du moteur pour le 2D.
+#ifdef PORTMASTER
+	glUseProgram( 0 );
+	glActiveTexture( GL_TEXTURE0 );
+	glClientActiveTexture( GL_TEXTURE0 );
+#endif
 	glMatrixMode( GL_PROJECTION );
 	glLoadIdentity();
+#ifdef PORTMASTER
+	// Ecran de n'importe quelle forme : le 2D reste 4:3, centre (p_gamma.cpp).
+	float e_g, e_d, e_h, e_b;
+	NxVita::Ecran2DBornes( &e_g, &e_d, &e_h, &e_b );
+	const float e_k = NxVita::Ecran2DCouverture();
+	glOrtho( e_g, e_d, e_b, e_h, -1.0f, 1.0f );
+	// Hors 4:3 : le 2D ordinaire est coupe au cadre 4:3 (ce que le jeu range
+	// hors de l'ecran reste cache) ; ce qui doit remplir l'ecran (aplats,
+	// images plein ecran, prolongements en miroir) passe sans coupe.
+	int e_cadre[4];
+	const bool e_autre = NxVita::Ecran2DCadre( e_cadre );
+	const GLboolean e_sc_avant = e_autre ? glIsEnabled( GL_SCISSOR_TEST ) : GL_FALSE;
+	int e_coupe = -1;	// coupe en place : -1 inconnue, 0 aucune, 1 cadre
+	if( e_autre )
+		glScissor( e_cadre[0], e_cadre[1], e_cadre[2], e_cadre[3] );
+#else
 	glOrtho( 0.0f, SCREEN_W, SCREEN_H, 0.0f, -1.0f, 1.0f );
+#endif
 
 	glMatrixMode( GL_MODELVIEW );
 	glLoadIdentity();
@@ -196,6 +222,10 @@ void RenderSprites2D( float bas, float haut )
 	// Tableaux cote client : aucun VBO ne doit rester lie.
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
 	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
+#ifdef PORTMASTER
+	static GLuint s_sprite_vbo = 0;
+	if( !s_sprite_vbo ) glGenBuffers( 1, &s_sprite_vbo );
+#endif
 	glEnableClientState( GL_VERTEX_ARRAY );
 	glEnableClientState( GL_TEXTURE_COORD_ARRAY );
 
@@ -249,8 +279,40 @@ void RenderSprites2D( float bas, float haut )
 		float y0 = ( p->PosY() - oy + ENGINE_2D_Y_MARGIN ) * sy;
 		float x1 = x0 + w * sx;
 		float y1 = y0 + h * sy;
+#ifdef PORTMASTER
+		// Ecran d'une autre forme que 4:3 : un sprite qui couvre tout le
+		// cadre 4:3 doit couvrir tout l'ecran. Image : agrandie sans
+		// deformation (le surplus sort de l'ecran). Aplat (fondus, bandes) :
+		// prolonge jusqu'aux bords, sur la largeur et/ou la hauteur.
+		bool e_libre = false;	// remplit l'ecran : pas de coupe au cadre
+		if(( e_k > 1.001f ) && ( p->Rotation() == 0.0f ))
+		{
+			const bool plein_x = ( x0 <= 0.02f * SCREEN_W ) && ( x1 >= 0.98f * SCREEN_W );
+			const bool plein_y = ( y0 <= 0.06f * SCREEN_H ) && ( y1 >= 0.94f * SCREEN_H );
+			if( p_tex && plein_x && plein_y )
+			{
+				const float cx = SCREEN_W * 0.5f, cy = SCREEN_H * 0.5f;
+				x0 = cx + ( x0 - cx ) * e_k;
+				x1 = cx + ( x1 - cx ) * e_k;
+				y0 = cy + ( y0 - cy ) * e_k;
+				y1 = cy + ( y1 - cy ) * e_k;
+				e_libre = true;
+			}
+			else if( !p_tex )
+			{
+				if( plein_x ) { x0 = e_g; x1 = e_d; }
+				if( plein_y ) { y0 = e_h; y1 = e_b; }
+				e_libre = plein_x || plein_y;
+			}
+		}
+#endif
 
 		Image::RGBA c = p->Color();
+#ifdef PORTMASTER
+		// Degenerate or fully transparent quads have no visible contribution.
+		if(( w == 0.0f ) || ( h == 0.0f ) || ( c.a == 0 ))
+			continue;
+#endif
 
 		// Les couleurs du moteur sont sur 0..128 (heritage PS2), pas 0..255 :
 		// prendre 255 comme plein assombrirait tout de moitie.
@@ -400,9 +462,98 @@ void RenderSprites2D( float bas, float haut )
 			}
 		}
 
+#ifdef PORTMASTER
+		if( e_autre && (( e_libre ? 0 : 1 ) != e_coupe ))
+		{
+			e_coupe = e_libre ? 0 : 1;
+			if( e_coupe ) glEnable( GL_SCISSOR_TEST );
+			else glDisable( GL_SCISSOR_TEST );
+		}
+		// The Mali GLES driver can retain client pointers after glDrawArrays.
+		// Upload both streams before drawing so no stack address reaches it.
+		float stream[20];
+		for( int k = 0; k < 4; ++k )
+		{
+			stream[k * 5 + 0] = verts[k * 3 + 0];
+			stream[k * 5 + 1] = verts[k * 3 + 1];
+			stream[k * 5 + 2] = verts[k * 3 + 2];
+			stream[k * 5 + 3] = uvs[k * 2 + 0];
+			stream[k * 5 + 4] = uvs[k * 2 + 1];
+		}
+		glBindBuffer( GL_ARRAY_BUFFER, s_sprite_vbo );
+		glBufferData( GL_ARRAY_BUFFER, sizeof( stream ), stream, GL_STREAM_DRAW );
+		glVertexPointer( 3, GL_FLOAT, 5 * sizeof( float ), (const void *)0 );
+		glTexCoordPointer( 2, GL_FLOAT, 5 * sizeof( float ), (const void *)( 3 * sizeof( float ) ));
+		glDrawArrays( GL_TRIANGLE_FAN, 0, 4 );
+
+		// Une image qui touche un bord du cadre 4:3 du cote ou l'ecran a de
+		// la place en plus (bandeaux, fonds de menu) y est prolongee en
+		// MIROIR de sa propre bordure : l'ecran est rempli, rien n'est
+		// etire. Les petits elements (HUD) ne sont pas concernes.
+		if( e_autre && !e_libre && p_tex && ( rot == 0.0f )
+		    && (( x1 - x0 ) >= 64.0f ) && (( y1 - y0 ) >= 32.0f ))
+		{
+			const float lw = x1 - x0, lh = y1 - y0;
+			const float du = uu / lw, dv = ( vv - 1.0f ) / lh;	// cf. uvs ci-dessus
+			// par prolongement : xa, xb, ya, yb, u en xa, u en xb, v en ya, v en yb
+			float q[4][8];
+			int nq = 0;
+			// Miroir autour du BORD DU CADRE : la partie visible du sprite
+			// (coupee au cadre) se reflete dans la place en plus.
+			#define E_U( x ) ((( x ) - x0 ) * du )
+			#define E_V( y ) ( 1.0f + (( y ) - y0 ) * dv )
+			if( x0 <= 1.0f )
+			{
+				const float ext = fminf( 0.0f - e_g, fminf( x1, SCREEN_W ));
+				const float t[8] = { -ext, 0.0f, y0, y1, E_U( ext ), E_U( 0.0f ), 1.0f, vv };
+				if( ext > 0.5f ) memcpy( q[nq++], t, sizeof( t ));
+			}
+			if( x1 >= SCREEN_W - 1.0f )
+			{
+				const float ext = fminf( e_d - SCREEN_W, SCREEN_W - fmaxf( x0, 0.0f ));
+				const float t[8] = { SCREEN_W, SCREEN_W + ext, y0, y1,
+				                     E_U( SCREEN_W ), E_U( SCREEN_W - ext ), 1.0f, vv };
+				if( ext > 0.5f ) memcpy( q[nq++], t, sizeof( t ));
+			}
+			if( y0 <= 1.0f )
+			{
+				const float ext = fminf( 0.0f - e_h, fminf( y1, SCREEN_H ));
+				const float t[8] = { x0, x1, -ext, 0.0f, 0.0f, uu, E_V( ext ), E_V( 0.0f ) };
+				if( ext > 0.5f ) memcpy( q[nq++], t, sizeof( t ));
+			}
+			if( y1 >= SCREEN_H - 1.0f )
+			{
+				const float ext = fminf( e_b - SCREEN_H, SCREEN_H - fmaxf( y0, 0.0f ));
+				const float t[8] = { x0, x1, SCREEN_H, SCREEN_H + ext,
+				                     0.0f, uu, E_V( SCREEN_H ), E_V( SCREEN_H - ext ) };
+				if( ext > 0.5f ) memcpy( q[nq++], t, sizeof( t ));
+			}
+			#undef E_U
+			#undef E_V
+			if( nq && ( e_coupe != 0 ))
+			{
+				glDisable( GL_SCISSOR_TEST );
+				e_coupe = 0;
+			}
+			for( int k = 0; k < nq; ++k )
+			{
+				const float *t = q[k];
+				const float s[20] = { t[0], t[2], 0.0f, t[4], t[6],
+				                      t[1], t[2], 0.0f, t[5], t[6],
+				                      t[1], t[3], 0.0f, t[5], t[7],
+				                      t[0], t[3], 0.0f, t[4], t[7] };
+				glBufferData( GL_ARRAY_BUFFER, sizeof( s ), s, GL_STREAM_DRAW );
+				glVertexPointer( 3, GL_FLOAT, 5 * sizeof( float ), (const void *)0 );
+				glTexCoordPointer( 2, GL_FLOAT, 5 * sizeof( float ), (const void *)( 3 * sizeof( float )));
+				glDrawArrays( GL_TRIANGLE_FAN, 0, 4 );
+			}
+		}
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+#else
 		glVertexPointer( 3, GL_FLOAT, 0, verts );
 		glTexCoordPointer( 2, GL_FLOAT, 0, uvs );
 		glDrawArrays( GL_TRIANGLE_FAN, 0, 4 );
+#endif
 
 		glPopMatrix();
 		++drawn;
@@ -419,6 +570,13 @@ void RenderSprites2D( float bas, float haut )
 	}
 	glDisable( GL_BLEND );
 	glDisable( GL_TEXTURE_2D );
+#ifdef PORTMASTER
+	if( e_autre )
+	{
+		if( e_sc_avant ) glEnable( GL_SCISSOR_TEST );
+		else glDisable( GL_SCISSOR_TEST );
+	}
+#endif
 
 	// Battement : dire POURQUOI rien ne sort est aussi utile que dire que
 	// quelque chose sort. On compte separement les causes de rejet.

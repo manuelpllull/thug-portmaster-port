@@ -94,7 +94,9 @@ static void sGetWorldMatrixFromScreenPosition(int camera_num, Mth::Matrix *p_wor
 	screenY -= SCREEN_CONV_Y(448)/2;
 
 	// Adjust X for aspect ratio that is different than 4/3 (1.3333333)
+#ifndef PORTMASTER	// PortMaster: the 2D stays 4:3, centred, so no correction (p_gamma.cpp)
 	screenX *= (Nx::CViewportManager::sGetScreenAspect() / 1.3333333f);
+#endif
 
 	// Inverse project.
 	camera_space_pos.Set(-screenX * zOffset / SCREEN_CONV_X(448),

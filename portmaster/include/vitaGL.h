@@ -33,7 +33,19 @@ int vglInit(int width, int height);
 int vglInitExtended(int flags, int width, int height, int ram_sz, int msaa);
 void vglSwapBuffers(GLboolean wait);
 void vglEnd(void);
-static inline int eglSwapInterval(void *dpy, int interval) { return 0; }
+int vglSwapInterval(void *display, int interval);
+#define eglSwapInterval vglSwapInterval
+int portmaster_shader_source(GLuint shader, GLenum type, const char *source, const char *name);
+
+#define THUG_FRAMEBUFFER_WIDTH 640
+#define THUG_FRAMEBUFFER_HEIGHT 480
+// What the game really renders: the screen's shape, set at window creation
+// (portmaster_platform.cpp). THUG_FRAMEBUFFER_* are only the desktop default.
+extern int g_thug_render_w, g_thug_render_h;
+extern float g_thug_screen_aspect;
+// Set during a frame (menus, loading screens): the presenter fills the room
+// around the 4:3 picture with its own edges, mirrored. Reset at each present.
+extern int g_thug_present_mirror;
 
 static inline void* vgl_memalign(size_t align, size_t size) { return memalign(align, size); }
 static inline void vgl_free(void *ptr) { free(ptr); }

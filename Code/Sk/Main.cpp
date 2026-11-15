@@ -285,7 +285,7 @@ int main ( sint argc, char** argv )
 #ifndef THUG_RELEASE
 	vita_dbgsrv_start();
 #endif
-	VLOG( "SYS", "=== THUG-Vita — palier 2, entree dans main() ===" );
+	VLOG( "SYS", "=== THUG Linux handheld — palier 2, entree dans main() ===" );
 	// HORLOGES. Elles etaient reglees dans main_vita.cpp, le point d'entree
 	// du palier 0, sorti du build depuis que ce main-ci le remplace : le jeu
 	// tournait depuis aux frequences PAR DEFAUT de Sony -- CPU a 333 MHz, GPU

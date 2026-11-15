@@ -279,7 +279,7 @@ static void ecran_raccourcis( void )
 // #34) -- personne ne les trouvait. La descente n'est plus L1+R1
 // (trickcomponent.cpp reprend le Xbox_Trigger) : sinon L+R en l'air,
 // le spine transfer, ferait descendre de la planche.
-int g_vita_manette_ds = 0;
+int g_vita_manette_ds = 1;
 
 // Pave arriere en disposition DualShock : moitie gauche = L2, droite = R2.
 static void pave_arriere( bool *p_l2, bool *p_r2 )
@@ -334,8 +334,8 @@ static bool s_inv_rx = false, s_inv_ry = false;
 // Modele du fichier ecrit (absent au demarrage, ou bascule depuis le menu) :
 // six %d, dans l'ordre de reglages_ecrire.
 static const char s_controls_modele[] =
-	"# THUG Vita - port settings, read when the game starts.\n"
-	"# Also editable in game: OPTIONS > Control Setup > Vita Options.\n"
+	"# THUG Linux handheld - port settings, read when the game starts.\n"
+	"# Also editable in game: OPTIONS > Control Setup > Linux Handheld Options.\n"
 	"# 0 = off, 1 = on. Delete this file to restore the defaults.\n"
 	"#\n"
 	"# Invert a stick axis. Left stick = skater (and menus), right stick = camera.\n"
@@ -344,12 +344,12 @@ static const char s_controls_modele[] =
 	"invert_right_x=%d\n"
 	"invert_right_y=%d\n"
 	"#\n"
-	"# 0: PS Vita buttons, Xbox layout (L = L1+L2, R = R1+R2, SELECT = get off).\n"
-	"# 1: DualShock layout for PS TV / external pads / trigger grips: L1, L2, R1,\n"
-	"#    R2 apart, rear touchpad halves = L2/R2, L1+R1 = get off the board.\n"
+	"# 0: Xbox trigger layout (L = L1+L2, R = R1+R2, SELECT = get off).\n"
+	"# 1: PS2 layout: L1, L2, R1,\n"
+	"#    R2 are separate, L1+R1 = get off the board.\n"
 	"dualshock_layout=%d\n"
 	"#\n"
-	"# Display frame rate cap: 60, or 30 (steadier: every frame lasts 2 vsyncs).\n"
+	"# Display frame rate cap: 60 or 30 (software paced on non-60 Hz screens).\n"
 	"framerate=%d\n";
 
 static bool s_reglages_lus_une_fois = false;
@@ -378,7 +378,12 @@ static void reglages_appliquer( const char *p_cle, int v )
 	else if( strcmp( p_cle, "invert_left_y" ) == 0 )		s_inv_ly = ( v != 0 );
 	else if( strcmp( p_cle, "invert_right_x" ) == 0 )		s_inv_rx = ( v != 0 );
 	else if( strcmp( p_cle, "invert_right_y" ) == 0 )		s_inv_ry = ( v != 0 );
-	else if( strcmp( p_cle, "dualshock_layout" ) == 0 )		g_vita_manette_ds = ( v != 0 );
+	else if( strcmp( p_cle, "dualshock_layout" ) == 0 )
+#ifdef PORTMASTER
+		g_vita_manette_ds = 1; // R36S has separate L1/L2 and R1/R2 controls.
+#else
+		g_vita_manette_ds = ( v != 0 );
+#endif
 	// Cles des versions 1.0-1.1 (disposition tactile), sans objet depuis la
 	// disposition Xbox : ignorees sans bruit, le fichier est reecrit sans elles
 	// au prochain changement de reglage.
@@ -438,7 +443,7 @@ static void reglages_lire( void )
 		p = fin + 1;
 	}
 	VLOG( "PAD", "controls.txt : inversion lx=%d ly=%d rx=%d ry=%d, disposition %s, %d images/s",
-	      s_inv_lx, s_inv_ly, s_inv_rx, s_inv_ry, g_vita_manette_ds ? "DualShock" : "Vita (Xbox)",
+	      s_inv_lx, s_inv_ly, s_inv_rx, s_inv_ry, g_vita_manette_ds ? "DualShock" : "Linux handheld",
 	      ( NxVita::g_vita_cadence == 30 ) ? 30 : 60 );
 }
 
@@ -469,7 +474,7 @@ int VitaReglageBasculer( const char *p_cle )
 	const int nv = ( strcmp( p_cle, "framerate" ) == 0 ) ? (( v == 30 ) ? 60 : 30 ) : !v;
 	reglages_appliquer( p_cle, nv );
 	const bool ok = reglages_ecrire();
-	VLOG( "PAD", "Vita Options : %s = %d (controls.txt %s)", p_cle, nv, ok ? "ecrit" : "NON ECRIT" );
+	VLOG( "PAD", "Linux handheld options : %s = %d (controls.txt %s)", p_cle, nv, ok ? "ecrit" : "NON ECRIT" );
 	return VitaReglageValeur( p_cle );
 }
 
@@ -2888,7 +2893,11 @@ void Device::read_data( void )
 	const bool noir  = sel && pd;
 	const bool blanc = sel && !pd;
 	if( g_vita_manette_ds )
+	{
+#ifndef PORTMASTER
 		pave_arriere( &l2, &r2 );
+#endif
+	}
 	if( pad.buttons & SCE_CTRL_START )		b2 &= ~( 1 << 3 );
 	if( pad.buttons & SCE_CTRL_UP )			b2 &= ~( 1 << 4 );
 	if( pad.buttons & SCE_CTRL_RIGHT )		b2 &= ~( 1 << 5 );

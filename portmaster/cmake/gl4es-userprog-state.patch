@@ -1,0 +1,160 @@
+diff --git a/src/gl/fpe.c b/src/gl/fpe.c
+index a3d0d27..e8183da 100644
+--- a/src/gl/fpe.c
++++ b/src/gl/fpe.c
+@@ -286,6 +286,22 @@ void APIENTRY_GL4ES fpe_ReleventState(fpe_state_t *dest, fpe_state_t *src, int f
+         dest->blendeqrgb = 0;
+         dest->blendeqalpha = 0;
+     }
++    // THUG R36S: for a user GLSL program, fpe_CustomVertexShader and
++    // fpe_CustomFragmentShader only read plane, alphatest, alphafunc and the
++    // blend funcs (already cleared above, so blend_enable alone changes
++    // nothing). Any other leftover field (blend_enable, stale texformat,
++    // texenv, texcombine, texgen) only made the state non-empty: a custom
++    // copy of the program and a full uniform sync on every draw, with the
++    // same shader output. Keep just the fields that change the shader.
++    if(!fixed && globals4es.userprog_state) {
++        unsigned int plane = dest->plane;
++        unsigned int alphatest = dest->alphatest;
++        unsigned int alphafunc = dest->alphafunc;
++        memset(dest, 0, sizeof(fpe_state_t));
++        dest->plane = plane;
++        dest->alphatest = alphatest;
++        dest->alphafunc = alphafunc;
++    }
+ }
+ 
+ int APIENTRY_GL4ES fpe_IsEmpty(fpe_state_t *state) {
+@@ -1096,6 +1112,10 @@ int fpe_gettexture(int TMU) {
+     return target;
+ }
+ 
++// THUG R36S: [0] draws with a user GLSL program, [1] of those that went
++// through a customised copy (fpe_CustomShader + fpe_SyncUniforms). Read and
++// reset by the port's [PACE] log line.
++unsigned int gl4es_thug_counts[2] = {0, 0};
+ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* indices, scratch_t* scratch) {
+     // the handling of GL_BGRA size of GL_DOUBLE using 1 scratch in not ideal, and a waste when dealing with Buffers
+     // TODO: have the scratch buffer part of the VBO, and tag it dirty when buffer is changed (or always dirty for VBO 0)
+@@ -1170,8 +1190,11 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+             }
+         }
+         // synchronize uniforms with parent!
+-        if(glprogram != glstate->glsl->glprogram)
++        ++gl4es_thug_counts[0];
++        if(glprogram != glstate->glsl->glprogram) {
++            ++gl4es_thug_counts[1];
+             fpe_SyncUniforms(&glstate->glsl->glprogram->cache, glprogram);
++        }
+     } else {
+         fpe_program(ispoint);
+         if(glstate->gleshard->program != glstate->fpe->prog)
+@@ -2207,3 +2230,82 @@ int builtin_CheckVertexAttrib(program_t *glprogram, char* name, GLint id) {
+     }
+     return 0;
+ }
++
++// ---------------------------------------------------------------------------
++// THUG R36S: helpers for the port's direct GLES path (world batches drawn with
++// real GLES calls, see Code/Gfx/Vita/p_shader_decor.cpp). The port draws
++// inside its own real VAOs and sampler objects, then calls
++// gl4es_thug_restore() so the real state matches what gl4es believes again.
++// ---------------------------------------------------------------------------
++#include "texture.h"
++#include "buffers.h"
++#include "shader.h"
++
++void* gl4es_thug_real_proc(const char *name) {
++    return proc_address(NULL, name);
++}
++
++// Real texture name and the filters gl4es applied to it. 0 when the texture
++// is not a plain, uploaded GL_TEXTURE_2D (then the port keeps the gl4es path).
++int gl4es_thug_tex(GLuint name, GLuint *real, GLenum *minf, GLenum *magf) {
++    gltexture_t *t = gl4es_getTexture(GL_TEXTURE_2D, name);
++    if(!t || !t->valid || !t->glname || t->adjust || t->streamed)
++        return 0;
++    *real = t->glname;
++    *minf = t->actual.min_filter ? t->actual.min_filter : t->sampler.min_filter;
++    *magf = t->actual.mag_filter ? t->actual.mag_filter : t->sampler.mag_filter;
++    return 1;
++}
++
++GLuint gl4es_thug_buf(GLuint name) {
++    glbuffer_t *b = getbuffer_id(name);
++    return b ? b->real_buffer : 0;
++}
++
++// GLSL ES source gl4es compiled for this shader (its converted text).
++const char* gl4es_thug_shader_es(GLuint shader) {
++    khash_t(shaderlist) *shaders = glstate->glsl->shaders;
++    khint_t k = kh_get(shaderlist, shaders, shader);
++    if(k == kh_end(shaders))
++        return NULL;
++    shader_t *s = kh_value(shaders, k);
++    return s->converted ? s->converted : NULL;
++}
++
++// Put back the real program, active unit, 2D texture of units [0, units) and
++// GL_ARRAY_BUFFER binding that gl4es has cached.
++void gl4es_thug_restore(int units) {
++    LOAD_GLES(glBindTexture);
++    LOAD_GLES(glActiveTexture);
++    LOAD_GLES(glBindBuffer);
++    LOAD_GLES2(glUseProgram);
++    for(int i=0; i<units && i<hardext.maxtex; ++i) {
++        gles_glActiveTexture(GL_TEXTURE0+i);
++        gles_glBindTexture(GL_TEXTURE_2D, glstate->actual_tex2d[i]);
++    }
++    gles_glActiveTexture(GL_TEXTURE0+glstate->gleshard->active);
++    gles_glUseProgram(glstate->gleshard->program);
++    gles_glBindBuffer(GL_ARRAY_BUFFER, glstate->bind_buffer.array);
++}
++
++// THUG R36S presenter thread: the render context has no window surface. Every
++// bind of "framebuffer 0" by gl4es goes to this off-screen buffer instead
++// (gl4es already redirects 0 to mainfbo_fbo); the port switches it each frame.
++void gl4es_thug_set_mainfbo(GLuint fbo, GLuint tex, int w, int h) {
++    LOAD_GLES2_OR_OES(glBindFramebuffer);
++    glstate->fbo.mainfbo_fbo = fbo;
++    glstate->fbo.mainfbo_tex = tex;
++    glstate->fbo.mainfbo_width = w;
++    glstate->fbo.mainfbo_height = h;
++    if (glstate->fbo.current_fb->id == 0)
++        gles_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++}
++
++// THUG R36S: the port quits with exit() and never calls close_gl4es(), so the
++// PrecompiledShaderArchive (fixed-pipeline programs, saved as binaries) was
++// never written and every launch recompiled them at first use. Called from an
++// atexit handler: only serialises binaries gl4es already holds in memory.
++void fpe_writePSA();
++void gl4es_thug_save_psa(void) {
++    fpe_writePSA();
++}
+diff --git a/src/gl/init.c b/src/gl/init.c
+index 9c26f8b..6dd187e 100644
+--- a/src/gl/init.c
++++ b/src/gl/init.c
+@@ -563,6 +563,9 @@ void initialize_gl4es() {
+         }
+       }
+ 
++    // THUG R36S: THUG_GL4ES_USERPROG=0 restores upstream behaviour.
++    globals4es.userprog_state = ReturnEnvVarIntDef("THUG_GL4ES_USERPROG",1);
++
+     globals4es.fbomakecurrent = 0;
+     if((hardext.vendor & VEND_ARM) || (globals4es.usefb))
+         globals4es.fbomakecurrent = 1;
+diff --git a/src/gl/init.h b/src/gl/init.h
+index bf2bba7..fa69fd3 100644
+--- a/src/gl/init.h
++++ b/src/gl/init.h
+@@ -53,6 +53,7 @@ typedef struct _globals4es {
+  int es;
+  int gl;
+  int usevbo;
++ int userprog_state; // THUG: GLSL programs ignore fixed state their custom shader never reads
+  int comments;
+  int forcenpot;
+  int fbomakecurrent;    // hack to bind/unbind FBO when doing glXMakeCurrent

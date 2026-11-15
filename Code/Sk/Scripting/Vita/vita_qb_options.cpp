@@ -322,7 +322,7 @@ static const char *verifier_qb( const uint8 *p_qb, uint32 taille, uint32 *p_octe
 void VitaChargerQBOptions( void )
 {
 #ifdef THUG_SANS_MENU_VITA
-	VLOG( "QB", "vita_options.qb : non embarque (python3 absent au build), menu Vita Options absent" );
+	VLOG( "QB", "vita_options.qb : non embarque (python3 absent au build), menu Linux handheld options absent" );
 #else
 	const uint8 *p_qb = vita_options_qb;
 	const uint32 taille = vita_options_qb_size;
@@ -410,7 +410,10 @@ static const char *cle_depuis_params( Script::CStruct *pParams )
 static const char *texte_valeur( const char *p_cle, int v )
 {
 	if( strcmp( p_cle, "framerate" ) == 0 )			return ( v == 30 ) ? "30 fps" : "60 fps";
-	if( strcmp( p_cle, "dualshock_layout" ) == 0 )	return v ? "dualshock" : "ps vita";
+	if( strcmp( p_cle, "dualshock_layout" ) == 0 )
+	{
+		return v ? "PS2" : "Xbox";
+	}
 	if( strncmp( p_cle, "invert_", 7 ) == 0 )		return v ? "inverted" : "normal";
 	return v ? "on" : "off";
 }

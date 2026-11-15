@@ -20,6 +20,9 @@
 
 #include "vita_log.h"
 #include "p_NxFont.h"
+#ifdef PORTMASTER
+#include "p_gamma.h"
+#endif
 #include <gfx/NxFontMan.h>
 
 #define SCREEN_W	960.0f
@@ -135,7 +138,17 @@ static const STexteVita s_textes_vita[] =
 	// « Save trick to Hard Drive » (catmenu.q:520, trick slots pleins)
 	{ "Hard Drive",					"Memory Card" },
 	// « Please do not turn off your Xbox console. »
-	{ "your Xbox console",			"your PS Vita system" },
+	{ "your Xbox console",			"your Linux handheld" },
+#ifdef PORTMASTER
+	// Port-specific settings menu and Vita-branded script labels.
+	{ "PlayStation Vita", 			"Linux handheld" },
+	{ "Playstation Vita", 			"Linux handheld" },
+	{ "PLAYSTATION VITA", 			"LINUX HANDHELD" },
+	{ "PS Vita", 				"Linux handheld" },
+	{ "PS VITA", 				"LINUX HANDHELD" },
+	{ "Vita Options", 			"Linux handheld options" },
+	{ "VITA OPTIONS", 			"LINUX HANDHELD" },
+#endif
 	// « Your Xbox does not have enough free blocks to save ... »
 	{ "Your Xbox",					"Your memory card" },
 	// « Unable to load %s. Press A to continue. » -> icone de l'action Go
@@ -238,7 +251,7 @@ char *TexteVitaSubstitue( const char *p_in )
 	}
 	strcpy( o, p );
 
-	VLOG( "TXT", "texte Vita : \"%.80s\" -> \"%.80s\"", p_in, p_out );
+	VLOG( "TXT", "texte Linux handheld : \"%.80s\" -> \"%.80s\"", p_in, p_out );
 	return p_out;
 }
 
@@ -297,14 +310,18 @@ void CVitaFont::plat_mark_as_button_font( bool isButton )
 		if( !s_lr_essaye )
 		{
 			s_lr_essaye = true;
-			// Construit dans un tampon statique : ni tas du moteur, ni
-			// destructeur a la sortie (glDeleteTextures apres vglEnd).
-			// Jamais liberee, comme la police de boutons, chargee une fois.
+			// Keep the Xbox glyph sheet alive for the game session. On R36S
+			// this sheet labels the physical face buttons A/B/X/Y.
 			static double s_lr_mem[( sizeof( CVitaFont ) + sizeof( double ) - 1 ) / sizeof( double )];
 			CVitaFont *p_lr = new( (void *)s_lr_mem ) CVitaFont;
 			if( p_lr->plat_load( "ButtonsXbox" ))
+			{
 				sp_buttons_lr = p_lr;
-			VLOG( "FNT", "icones L/R/L+R Xbox : %s", sp_buttons_lr ? "ButtonsXbox" : "absentes, icones PS2" );
+#ifdef PORTMASTER
+				sp_buttons_font = p_lr;
+#endif
+			}
+			VLOG( "FNT", "R36S button glyphs: %s", sp_buttons_lr ? "ButtonsXbox" : "PS2 fallback" );
 		}
 	}
 }
@@ -345,7 +362,12 @@ const SVitaGlyph *CVitaFont::ParseTag( const char **pp, CVitaFont **pp_font ) co
 				const bool meta = ( *q == 'm' ) || ( *q == 'M' );
 				++q;
 				char d = meta ? Nx::CFontManager::sMapMetaCharacterToButton( q ) : *q;
-				const int n = dehex( d );
+				int n = dehex( d );
+#ifdef PORTMASTER
+				// Translate all four face labels from Xbox order to R36S
+				// silkscreen positions: top X, left Y, right A, bottom B.
+				if(( n >= 0 ) && ( n <= 3 )) n ^= 1;
+#endif
 				if( sp_buttons_font )
 				{
 					*pp_font = sp_buttons_font;
@@ -762,9 +784,30 @@ static void lot_vider( void )
 {
 	if( !s_lot_n )
 		return;
+#ifdef PORTMASTER
+	// Use a VBO on Mali; gl4es otherwise passes client arrays to the driver.
+	static GLuint s_text_vbo = 0;
+	static float s_stream[LOT_GLYPHES_MAX * 6 * 5];
+	if( !s_text_vbo ) glGenBuffers( 1, &s_text_vbo );
+	for( int k = 0; k < s_lot_n * 6; ++k )
+	{
+		s_stream[k * 5 + 0] = s_lot_xyz[k * 3 + 0];
+		s_stream[k * 5 + 1] = s_lot_xyz[k * 3 + 1];
+		s_stream[k * 5 + 2] = s_lot_xyz[k * 3 + 2];
+		s_stream[k * 5 + 3] = s_lot_uv[k * 2 + 0];
+		s_stream[k * 5 + 4] = s_lot_uv[k * 2 + 1];
+	}
+	glBindBuffer( GL_ARRAY_BUFFER, s_text_vbo );
+	glBufferData( GL_ARRAY_BUFFER, s_lot_n * 6 * 5 * sizeof( float ), s_stream, GL_STREAM_DRAW );
+	glVertexPointer( 3, GL_FLOAT, 5 * sizeof( float ), (const void *)0 );
+	glTexCoordPointer( 2, GL_FLOAT, 5 * sizeof( float ), (const void *)( 3 * sizeof( float ) ));
+	glDrawArrays( GL_TRIANGLES, 0, s_lot_n * 6 );
+	glBindBuffer( GL_ARRAY_BUFFER, 0 );
+#else
 	glVertexPointer( 3, GL_FLOAT, 0, s_lot_xyz );
 	glTexCoordPointer( 2, GL_FLOAT, 0, s_lot_uv );
 	glDrawArrays( GL_TRIANGLES, 0, s_lot_n * 6 );
+#endif
 	++g_vita_2d_appels_txt;
 	s_lot_n = 0;
 }
@@ -830,9 +873,32 @@ void RenderText2D( float pri )
 		sp_texts[j + 1] = p;
 	}
 
+#ifdef PORTMASTER
+	glUseProgram( 0 );
+	glActiveTexture( GL_TEXTURE0 );
+	glClientActiveTexture( GL_TEXTURE0 );
+#endif
 	glMatrixMode( GL_PROJECTION );
 	glLoadIdentity();
+#ifdef PORTMASTER
+	{	// meme cadre 4:3 centre que les sprites (p_gamma.cpp)
+		float g, d, h, b;
+		NxVita::Ecran2DBornes( &g, &d, &h, &b );
+		glOrtho( g, d, b, h, -1.0f, 1.0f );
+	}
+	// Hors 4:3, le texte reste dans le cadre 4:3 : ce que le jeu range hors
+	// de l'ecran (menus qui glissent) ne doit pas apparaitre sur les cotes.
+	int t_cadre[4];
+	const bool t_coupe = NxVita::Ecran2DCadre( t_cadre );
+	const GLboolean t_sc_avant = t_coupe ? glIsEnabled( GL_SCISSOR_TEST ) : GL_FALSE;
+	if( t_coupe )
+	{
+		glEnable( GL_SCISSOR_TEST );
+		glScissor( t_cadre[0], t_cadre[1], t_cadre[2], t_cadre[3] );
+	}
+#else
 	glOrtho( 0.0f, SCREEN_W, SCREEN_H, 0.0f, -1.0f, 1.0f );
+#endif
 	glMatrixMode( GL_MODELVIEW );
 	glLoadIdentity();
 
@@ -1022,6 +1088,10 @@ void RenderText2D( float pri )
 	}
 	glDisable( GL_BLEND );
 	glDisable( GL_TEXTURE_2D );
+#ifdef PORTMASTER
+	if( t_coupe && !t_sc_avant )
+		glDisable( GL_SCISSOR_TEST );
+#endif
 
 	{
 		static int s_f = 0;

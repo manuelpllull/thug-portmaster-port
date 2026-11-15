@@ -147,6 +147,7 @@ _ZN3SIO13KeyboardClearEv:
 
 
 
+#ifndef PORTMASTER
 	.global _ZN3Tmr14GetRenderFrameEv
 	.thumb_func
 	.type _ZN3Tmr14GetRenderFrameEv, %function
@@ -155,6 +156,7 @@ _ZN3Tmr14GetRenderFrameEv:
 	vmov	s0, r0
 	bx	lr
 	.size _ZN3Tmr14GetRenderFrameEv, .-_ZN3Tmr14GetRenderFrameEv
+#endif
 
 
 
@@ -183,6 +185,7 @@ _ZN3Tmr14GetRenderFrameEv:
 
 @ gbQuit defined in portmaster_platform.cpp
 
+#ifndef PORTMASTER
 	.global gun_fired
 	.thumb_func
 	.type gun_fired, %function
@@ -200,6 +203,7 @@ screen_angle:
 	vmov	s0, r0
 	bx	lr
 	.size screen_angle, .-screen_angle
+#endif
 
 @ Les trios sSgltnInstance/sSgltnDelete/sp_sgltn_instance de GameNet::Manager,
 @ Mc::Manager et SIO::Manager sont desormais dans Code/Sys/Vita/p_singletons.cpp.

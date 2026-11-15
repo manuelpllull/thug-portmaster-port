@@ -24,6 +24,10 @@
 #include "p_NxFont.h"
 
 #include <vitaGL.h>
+#ifdef PORTMASTER
+#include <sys/mem/heap.h>
+#include <sys/mem/memman.h>
+#endif
 
 #include "p_NxLight.h"
 #include "p_shader_decor.h"
@@ -172,6 +176,11 @@ static void dessine_ecran_chargement( void )
 	if( !sp_load_screen )
 		return;
 
+#ifdef PORTMASTER
+	// Ecran de chargement entier (le nom du niveau est en haut), le reste de
+	// l'ecran rempli en miroir par le presenteur.
+	NxVita::DrawFullscreenTexture( sp_load_screen->GetGLTexture(), false, false );
+#else
 	glMatrixMode( GL_PROJECTION );
 	glPushMatrix();
 	glLoadIdentity();
@@ -223,6 +232,7 @@ static void dessine_ecran_chargement( void )
 	glMatrixMode( GL_PROJECTION );
 	glPopMatrix();
 	glMatrixMode( GL_MODELVIEW );
+#endif
 }
 
 
@@ -414,7 +424,16 @@ bool	CTexDictManager::s_plat_unload_texture_dictionary(CTexDict *p_tex_dict)
 	CVitaTexDict *p_vita = static_cast< CVitaTexDict * >( p_tex_dict );
 	if( !p_vita )
 		return false;
-	if( p_vita->m_vita_liberable || NxVita::MondeVide())
+	bool release_with_mesh = p_vita->m_vita_liberable;
+#ifdef PORTMASTER
+	// Cutscene props can have non-skin dictionaries on the cutscene heap.
+	// They must be destroyed with the cutscene before that heap is reset.
+	Mem::Manager &memory = Mem::Manager::sHandle();
+	const Mem::Allocator *owner = Mem::Allocator::BlockHeader::sRead( p_vita )->mpAlloc;
+	release_with_mesh = release_with_mesh || owner == memory.CutsceneBottomUpHeap()
+	                                     || owner == memory.CutsceneTopDownHeap();
+#endif
+	if( release_with_mesh || NxVita::MondeVide())
 	{
 		// #48 : en pleine image, pas de glFinish (il coupe la scene) : file.
 		if( g_vita_image_ouverte && g_vita_differer_lib && ( s_nb_dicts_differes < MAX_DICTS_ATTENTE ))

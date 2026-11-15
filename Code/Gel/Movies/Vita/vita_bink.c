@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 #include <psp2/io/fcntl.h>
 #endif
 
@@ -43,7 +43,7 @@ struct VitaBink
 	void				*user;
 	int					 vol;		/* 0..65536 */
 	short				*pcm;
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 	SceUID				 fd;
 #else
 	FILE				*fp;
@@ -55,7 +55,7 @@ struct VitaBink
 static int io_lire( void *o, uint8_t *buf, int n )
 {
 	VitaBink *b = (VitaBink *)o;
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 	int r = sceIoRead( b->fd, buf, n );
 	return r > 0 ? r : AVERROR_EOF;
 #else
@@ -67,7 +67,7 @@ static int io_lire( void *o, uint8_t *buf, int n )
 static int64_t io_seek( void *o, int64_t off, int whence )
 {
 	VitaBink *b = (VitaBink *)o;
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 	if( whence == AVSEEK_SIZE )
 	{
 		SceOff cur = sceIoLseek( b->fd, 0, SCE_SEEK_CUR );
@@ -140,7 +140,7 @@ VitaBink *vita_bink_open( const char *path, VitaBinkInfo *info,
 	if( !b )
 		return NULL;
 	b->vs = b->as = -1;
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 	b->fd = sceIoOpen( path, SCE_O_RDONLY, 0 );
 	if( b->fd < 0 ) { free( b ); return NULL; }
 #else
@@ -250,7 +250,7 @@ void vita_bink_close( VitaBink *b )
 		av_freep( &b->io->buffer );
 		avio_context_free( &b->io );
 	}
-#ifdef __vita__
+#if defined( __vita__ ) || defined( PORTMASTER )
 	if( b->fd >= 0 ) sceIoClose( b->fd );
 #else
 	if( b->fp ) fclose( b->fp );

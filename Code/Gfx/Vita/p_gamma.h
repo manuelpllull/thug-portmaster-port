@@ -35,6 +35,15 @@ void GammaImageDebut( void );
 // Sans effet si GammaImageDebut n'a pas redirige le rendu.
 void GammaImageFin( void );
 
+#ifdef PORTMASTER
+// couvrir : agrandie jusqu'a couvrir l'ecran (films) ; sinon entiere, au
+// centre, le presenteur remplissant le reste en miroir (ecrans de chargement).
+void DrawFullscreenTexture( unsigned int texture, bool flip_v, bool couvrir = true );
+void Ecran2DBornes( float *g, float *d, float *h, float *b );
+float Ecran2DCouverture( void );
+bool Ecran2DCadre( int r[4] );
+#endif
+
 } // namespace NxVita
 
 #endif // __GFX_VITA_P_GAMMA_H__

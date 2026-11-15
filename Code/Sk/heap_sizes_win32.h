@@ -24,7 +24,10 @@
 
 #else
 
-#ifdef	__NOPT_ASSERT__
+#ifdef PORTMASTER
+// The Xbox QB archives use more than the original fixed script heap.
+#define _SCRIPT_HEAP_SIZE (8 * 1024 * 1024)
+#elif defined( __NOPT_ASSERT__ )
 // K: On debug builds line number info is included in the qb's so add in another 500K for it.
 // On release builds the line number info is excluded by passing the nolinenumbers switch to
 // cleanass when it is called from easyburn.bat

@@ -218,7 +218,7 @@ script create_controller_config_menu
 		endif
 		; VITA { entree du menu des reglages du port (Player 1 / menu pause)
 		if ( <controller_number> = 1 )
-			theme_menu_add_item { text = "Vita Options"
+			theme_menu_add_item { text = "Linux Handheld Options"
 				id = menu_vita_options
 				pad_choose_script = generic_menu_pad_choose
 				pad_choose_params = { callback = create_vita_options_menu controller_number = <controller_number> from_options = <from_options> }
@@ -266,7 +266,7 @@ script create_controller_config_menu
 			centered
 		}
 		; VITA { entree du menu des reglages du port (menu principal)
-		theme_menu_add_item { text = "Vita Options"
+		theme_menu_add_item { text = "Linux Handheld Options"
 			id = menu_vita_options
 			pad_choose_script = generic_menu_pad_choose
 			pad_choose_params = { callback = create_vita_options_menu from_options = <from_options> }
@@ -303,7 +303,7 @@ script create_vita_options_menu
 		]
 	}
 	FormatText ChecksumName = title_icon "%i_control" i = ( THEME_PREFIXES [ current_theme_prefix ] )
-	make_new_themed_sub_menu title = "VITA OPTIONS" title_icon = <title_icon>
+	make_new_themed_sub_menu title = "LINUX HANDHELD" title_icon = <title_icon>
 	; Meme decor que CONTROL SETUP au menu principal : les scripts de focus du
 	; theme y touchent ces elements (sans eux : SetScreenElementProps sur un
 	; element absent, plantage a l'ouverture constate le 2026-10-10).
@@ -327,7 +327,6 @@ script create_vita_options_menu
 			{ pad_back generic_menu_pad_back params = { callback = create_controller_config_menu controller_number = <controller_number> from_options = <from_options> } }
 		]
 	}
-	vita_options_add_item text = "Controller" id = menu_vita_pad name = dualshock_layout
 	vita_options_add_item text = "Camera Up/Down" id = menu_vita_inv_ry name = invert_right_y
 	vita_options_add_item text = "Camera Left/Right" id = menu_vita_inv_rx name = invert_right_x
 	vita_options_add_item text = "Skater Up/Down" id = menu_vita_inv_ly name = invert_left_y

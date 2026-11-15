@@ -108,6 +108,9 @@ struct SProjection
 	Nx::CTexture *	p_tex;		// NULL = entree libre
 	GLuint			gl_tex;
 	GLuint			fbo;
+#ifdef PORTMASTER
+	GLuint depth;
+#endif
 	int				fbo_etat;	// 0 jamais tente, 1 pret, -1 echec
 	Nx::CModel *	p_modele;
 	bool			cam_ok;
@@ -364,6 +367,10 @@ void OmbreArreter( Nx::CTexture *p_tex )
 	// le detruit juste apres). vitaGL differe les liberations GPU.
 	if( p->fbo )
 		glDeleteFramebuffers( 1, &p->fbo );
+#ifdef PORTMASTER
+	if( p->depth )
+		glDeleteRenderbuffers( 1, &p->depth );
+#endif
 	VLOG( "OMB", "projection arretee : texture GL %u", (unsigned)p->gl_tex );
 	memset( p, 0, sizeof( *p ));
 }
@@ -644,6 +651,15 @@ static bool fbo_pret( SProjection *p )
 	glGenFramebuffers( 1, &p->fbo );
 	glBindFramebuffer( GL_FRAMEBUFFER, p->fbo );
 	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, p->gl_tex, 0 );
+#ifdef PORTMASTER
+	GLint previous_renderbuffer = 0;
+	glGetIntegerv( GL_RENDERBUFFER_BINDING, &previous_renderbuffer );
+	glGenRenderbuffers( 1, &p->depth );
+	glBindRenderbuffer( GL_RENDERBUFFER, p->depth );
+	glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, OMB_TAILLE, OMB_TAILLE );
+	glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, p->depth );
+	glBindRenderbuffer( GL_RENDERBUFFER, previous_renderbuffer );
+#endif
 	const GLenum statut = glCheckFramebufferStatus( GL_FRAMEBUFFER );
 	glBindFramebuffer( GL_FRAMEBUFFER, fb_avant );
 	if( statut != GL_FRAMEBUFFER_COMPLETE )
