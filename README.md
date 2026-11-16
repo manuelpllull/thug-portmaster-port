@@ -15,7 +15,6 @@ include any game data.
 | Device | Screen | CFW | Status |
 |---|---|---|---|
 | R36S (RK3326) | 640x480 | – | Runs. Frame-time hitches remain in busy areas |
-| R36S clone (RK3326) | 640x480 | dArkOS | Runs (community report, European disc) |
 | RG34XX (H700) | 720x480 | Knulli | Runs. Busy scenes drop frames; `THUG_RENDER_SCALE=0.75` helps |
 
 Other PortMaster devices with an armhf userland and 1 GB of RAM should work but
@@ -25,9 +24,9 @@ haven't been tested. Reports are welcome in the [issues](../../issues).
 
 - A handheld with [PortMaster](https://portmaster.games) installed.
 - The **Xbox** version of *Tony Hawk's Underground* as a disc image (`.iso`)
-  dumped from a disc you own. The USA release is tested; the European one has
-  been reported working. PS2 and GameCube versions won't work: the game reads
-  the Xbox data files.
+  dumped from a disc you own. Only the **USA** release is supported. Other
+  versions (PAL, PS2, GameCube) won't work: the game reads the USA Xbox data
+  files.
 - About **3.5 GB** free for the extracted game, plus room for the `.iso`
   during the first launch.
 
