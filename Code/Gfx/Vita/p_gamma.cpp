@@ -110,8 +110,14 @@ void GetGammaNormalized( float *fr, float *fg, float *fb )
 **  Passe plein ecran                                                       **
 *****************************************************************************/
 
+#ifdef PORTMASTER
+// Taille reelle du rendu : la forme de l'ecran (portmaster_platform.cpp).
+#define GAM_L g_thug_render_w
+#define GAM_H g_thug_render_h
+#else
 #define GAM_L	960
 #define GAM_H	544
+#endif
 
 enum { GAM_ATTR_POS = 0, GAM_ATTR_UV = 1 };
 
@@ -148,12 +154,18 @@ static GLuint s_prog  = 0;
 static GLint  s_loc_k = -1;
 static bool   s_lie   = false;	// le FBO est la cible de l'image en cours
 static bool   s_inverse = false;
+#ifdef PORTMASTER
+// Rectangle impose a la passe plein ecran (largeur 0 : tout l'ecran).
+static int    s_quad_vp[4] = { 0, 0, 0, 0 };
+#endif
 
-static bool pret( void )
+static bool preparer_quad( void )
 {
-	if( s_etat != 0 )
-		return ( s_etat > 0 );
-	s_etat = -1;
+	static bool attempted = false;
+	static bool ready = false;
+	if( attempted )
+		return ready;
+	attempted = true;
 
 	GLuint vs = CompilerShaderCache( GL_CG_VERTEX_SHADER_EXT, s_source_sommets, "gamma sommets" );
 	GLuint fs = CompilerShaderCache( GL_CG_FRAGMENT_SHADER_EXT, s_source_pixels, "gamma pixels" );
@@ -196,6 +208,18 @@ static bool pret( void )
 	glBufferData( GL_ARRAY_BUFFER, sizeof( quad ), quad, GL_STATIC_DRAW );
 	glBindBuffer( GL_ARRAY_BUFFER, buf_avant );
 
+	ready = true;
+	return true;
+}
+
+static bool pret( void )
+{
+	if( s_etat != 0 )
+		return ( s_etat > 0 );
+	s_etat = -1;
+	if( !preparer_quad() )
+		return false;
+
 	// Texture intermediaire : 1 texel par pixel, lue en NEAREST.
 	const unsigned int vram_avant = (unsigned int)vglMemFree( VGL_MEM_VRAM );
 	GLint act_avant = 0, tex_avant = 0;
@@ -217,6 +241,16 @@ static bool pret( void )
 	glGenFramebuffers( 1, &s_fbo );
 	glBindFramebuffer( GL_FRAMEBUFFER, s_fbo );
 	glFramebufferTexture2D( GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_tex, 0 );
+#ifdef PORTMASTER
+	GLint previous_renderbuffer = 0;
+	glGetIntegerv( GL_RENDERBUFFER_BINDING, &previous_renderbuffer );
+	GLuint depth = 0;
+	glGenRenderbuffers( 1, &depth );
+	glBindRenderbuffer( GL_RENDERBUFFER, depth );
+	glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, GAM_L, GAM_H );
+	glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth );
+	glBindRenderbuffer( GL_RENDERBUFFER, previous_renderbuffer );
+#endif
 	const GLenum statut = glCheckFramebufferStatus( GL_FRAMEBUFFER );
 	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
 	if( statut != GL_FRAMEBUFFER_COMPLETE )
@@ -232,6 +266,11 @@ static bool pret( void )
 
 void GammaImageDebut( void )
 {
+#ifdef PORTMASTER
+	static const char *gamma = getenv( "THUG_GAMMA" );
+	if( gamma && strcmp( gamma, "0" ) == 0 )
+		return;
+#endif
 	if( s_lie || !g_vita_gamma || !pret() )
 		return;
 	s_inverse = ( g_vita_gamma == 2 );
@@ -239,14 +278,8 @@ void GammaImageDebut( void )
 	s_lie = true;
 }
 
-void GammaImageFin( void )
+static void dessiner_quad( GLuint texture, bool inverse, float kr, float kg, float kb )
 {
-	if( !s_lie )
-		return;
-	s_lie = false;
-
-	const SceUInt64 t0 = sceKernelGetProcessTimeWide();
-
 	// L'etat est SAUVE puis RENDU : le backend garde des caches d'etat GL
 	// (cull_poser, zbias_poser...) qui deviendraient faux.
 	GLint vp[4], prog_avant = 0, act_avant = 0, tex_avant = 0, buf_avant = 0;
@@ -261,10 +294,16 @@ void GammaImageFin( void )
 	const GLboolean bl = glIsEnabled( GL_BLEND );
 	const GLboolean sc = glIsEnabled( GL_SCISSOR_TEST );
 	const GLboolean st = glIsEnabled( GL_STENCIL_TEST );
+#ifdef PORTMASTER
+	const GLboolean alpha = glIsEnabled( GL_ALPHA_TEST );
+	if( alpha ) glDisable( GL_ALPHA_TEST );
+#endif
 
-	// Retour a l'affichage. La scene du FBO est fermee par vitaGL au premier
-	// dessin qui suit (scene_reset), qui reapplique aussi le viewport.
-	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+#ifdef PORTMASTER
+	if( s_quad_vp[2] > 0 )
+		glViewport( s_quad_vp[0], s_quad_vp[1], s_quad_vp[2], s_quad_vp[3] );
+	else
+#endif
 	glViewport( 0, 0, GAM_L, GAM_H );
 	if( dt ) glDisable( GL_DEPTH_TEST );
 	if( cf ) glDisable( GL_CULL_FACE );
@@ -273,15 +312,15 @@ void GammaImageFin( void )
 	if( st ) glDisable( GL_STENCIL_TEST );
 
 	glUseProgram( s_prog );
-	glUniform3f( s_loc_k, 1.0f / s_gamma[0], 1.0f / s_gamma[1], 1.0f / s_gamma[2] );
-	glBindTexture( GL_TEXTURE_2D, s_tex );
+	glUniform3f( s_loc_k, kr, kg, kb );
+	glBindTexture( GL_TEXTURE_2D, texture );
 	glBindBuffer( GL_ARRAY_BUFFER, s_vbo );
 	glEnableVertexAttribArray( GAM_ATTR_POS );
 	glEnableVertexAttribArray( GAM_ATTR_UV );
 	glVertexAttribPointer( GAM_ATTR_POS, 2, GL_FLOAT, GL_FALSE, 4 * sizeof( float ), (void *)0 );
 	glVertexAttribPointer( GAM_ATTR_UV,  2, GL_FLOAT, GL_FALSE, 4 * sizeof( float ),
 	                       (void *)( 2 * sizeof( float )));
-	glDrawArrays( GL_TRIANGLE_STRIP, s_inverse ? 4 : 0, 4 );
+	glDrawArrays( GL_TRIANGLE_STRIP, inverse ? 4 : 0, 4 );
 	glDisableVertexAttribArray( GAM_ATTR_POS );
 	glDisableVertexAttribArray( GAM_ATTR_UV );
 
@@ -295,7 +334,110 @@ void GammaImageFin( void )
 	if( bl ) glEnable( GL_BLEND );
 	if( sc ) glEnable( GL_SCISSOR_TEST );
 	if( st ) glEnable( GL_STENCIL_TEST );
+#ifdef PORTMASTER
+	if( alpha ) glEnable( GL_ALPHA_TEST );
+#endif
 	glViewport( vp[0], vp[1], vp[2], vp[3] );
+
+}
+
+#ifdef PORTMASTER
+// Images 4:3 (films, ecrans de chargement) sur un ecran de n'importe quelle
+// forme : agrandies sans deformation jusqu'a couvrir tout l'ecran, le
+// surplus (haut et bas, ou cotes) sort de l'ecran.
+void DrawFullscreenTexture( unsigned int texture, bool flip_v, bool couvrir )
+{
+	if( !preparer_quad() )
+		return;
+	const int W = GAM_L, H = GAM_H;
+	int vw = W, vh = H;
+	if( couvrir )
+	{
+		if( W * 3 > H * 4 )
+			vh = ( W * 3 + 3 ) / 4;
+		else if( W * 3 < H * 4 )
+			vw = ( H * 4 + 2 ) / 3;
+	}
+	else
+	{
+		if( W * 3 > H * 4 )
+			vw = ( H * 4 + 1 ) / 3;
+		else if( W * 3 < H * 4 )
+			vh = ( W * 3 + 2 ) / 4;
+		if(( vw != W ) || ( vh != H ))
+		{
+			glClearColor( 0.0f, 0.0f, 0.0f, 1.0f );
+			glClear( GL_COLOR_BUFFER_BIT );
+			g_thug_present_mirror = 1;
+		}
+	}
+	s_quad_vp[0] = ( W - vw ) / 2;
+	s_quad_vp[1] = ( H - vh ) / 2;
+	s_quad_vp[2] = vw;
+	s_quad_vp[3] = vh;
+	dessiner_quad( texture, flip_v, 1.0f, 1.0f, 1.0f );
+	s_quad_vp[2] = 0;
+}
+
+// Le 2D du moteur (ecran 4:3, 960x544 unites dans ce portage) au centre de
+// l'ecran, a sa propre forme ; sur un ecran plus large la place en plus est a
+// gauche et a droite, sur un plus etroit en haut et en bas. Bornes glOrtho.
+void Ecran2DBornes( float *g, float *d, float *h, float *b )
+{
+	const float a = (float)GAM_L / (float)GAM_H, a43 = 4.0f / 3.0f;
+	*g = 0.0f; *d = 960.0f; *h = 0.0f; *b = 544.0f;
+	if( a > a43 )
+	{
+		const float l = 960.0f * a / a43;
+		*g = ( 960.0f - l ) * 0.5f;
+		*d = *g + l;
+	}
+	else if( a < a43 )
+	{
+		const float t = 544.0f * a43 / a;
+		*h = ( 544.0f - t ) * 0.5f;
+		*b = *h + t;
+	}
+}
+
+// Agrandissement (autour du centre) qui fait couvrir tout l'ecran a un
+// rectangle 4:3 plein ecran : 1 sur un ecran 4:3.
+float Ecran2DCouverture( void )
+{
+	const float a = (float)GAM_L / (float)GAM_H, a43 = 4.0f / 3.0f;
+	return a > a43 ? a / a43 : a43 / a;
+}
+
+// Le cadre 4:3 en pixels, pour glScissor (origine en bas a gauche). Faux sur
+// un ecran 4:3 : rien a couper.
+bool Ecran2DCadre( int r[4] )
+{
+	if( Ecran2DCouverture() < 1.001f )
+		return false;
+	float g, d, h, b;
+	Ecran2DBornes( &g, &d, &h, &b );
+	const float W = (float)GAM_L, H = (float)GAM_H;
+	const float x0 = ( 0.0f - g ) / ( d - g ) * W, x1 = ( 960.0f - g ) / ( d - g ) * W;
+	const float y0 = ( 0.0f - h ) / ( b - h ) * H, y1 = ( 544.0f - h ) / ( b - h ) * H;
+	r[0] = (int)( x0 + 0.5f );
+	r[1] = (int)( H - y1 + 0.5f );
+	r[2] = (int)( x1 + 0.5f ) - r[0];
+	r[3] = (int)( H - y0 + 0.5f ) - r[1];
+	return true;
+}
+#endif
+
+void GammaImageFin( void )
+{
+	if( !s_lie )
+		return;
+	s_lie = false;
+
+	const SceUInt64 t0 = sceKernelGetProcessTimeWide();
+
+	glBindFramebuffer( GL_FRAMEBUFFER, 0 );
+	dessiner_quad( s_tex, s_inverse, 1.0f / s_gamma[0],
+	               1.0f / s_gamma[1], 1.0f / s_gamma[2] );
 
 	// Cout PROCESSEUR de la passe (soumission). Le cout GPU ne se voit que
 	// dans le temps d'image : A/B "gam 0" / "gam 1" sur [PERF].

@@ -101,8 +101,23 @@ unsigned int ShaderMateriauCle( const SShaderMateriau *p );
 void ShaderMateriauDebut( const float *mvp );
 // Les textures sont liees par l'appelant : unite p = passe p.
 // Faux : pas de variante (table pleine) -- l'appelant ne dessine pas.
-bool ShaderMateriauMaillage( const SShaderMateriau *p );
+bool ShaderMateriauMaillage( const SShaderMateriau *p, unsigned int *p_vao = NULL );
 void ShaderMateriauFin();
+// PortMaster : passes en reflet (issue #5) dessinees par le shader GLSL
+// (THUG_GLSL_ENV, defaut 1). Toujours faux hors PortMaster.
+bool ShaderMateriauEnvGlsl( void );
+// PortMaster : lots dessines par des appels GLES reels (THUG_DIRECT_GL).
+// ShaderMateriauDirectLot rend false si le lot doit passer par gl4es.
+bool ShaderMateriauDirectActif( void );
+bool ShaderMateriauDirectLot( const SShaderMateriau *p, const unsigned int *tex,
+                              const unsigned char *au, const unsigned char *av, unsigned int ibo,
+                              unsigned int *p_vao, const int *first, const int *count, int n,
+                              unsigned int mode = GL_TRIANGLES );
+void ShaderMateriauDirectFin( void );
+void ShaderMateriauDirectLiberer( unsigned int vao );
+// PortMaster : test alpha fixe coupe pendant une section GLSL (gl4es).
+void Gl4esNeutreDebut( void );
+void Gl4esNeutreFin( void );
 
 // --- Chemin GXM direct des lots de decor (issue #18) ------------------------
 // Voir p_shader_decor.cpp. « gxd 0/1 ».

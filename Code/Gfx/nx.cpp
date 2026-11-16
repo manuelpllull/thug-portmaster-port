@@ -4,6 +4,11 @@
 #ifdef __PLAT_VITA__
 #include "vita_log.h"
 #endif
+#ifdef PORTMASTER
+#include <psp2/kernel/processmgr.h>
+#include <math.h>
+extern "C" float g_thug_screen_aspect;	// forme de l'ecran (portmaster_platform.cpp)
+#endif
 
 #include <gfx/nx.h>
 
@@ -138,7 +143,13 @@ void			CEngine::sStartEngine()
 	//
 	// C'est aussi ce que le commentaire du placement 2D annoncait : � se
 	// reglera au palier 4, avec une image a regarder �. L'image est la.
+	#ifdef PORTMASTER
+	// Ecran de n'importe quelle forme (appareils PortMaster) : la vue 3D prend
+	// la forme de l'ecran ; le 2D, lui, reste 4:3 au centre (p_gamma.cpp).
+	CViewportManager::sSetScreenAspect( g_thug_screen_aspect );
+#else
 	CViewportManager::sSetScreenAspect( 960.0f / 544.0f );
+#endif
 #else
 	CViewportManager::sSetScreenAspect(4.0f/3.0f);
 #endif
@@ -166,7 +177,18 @@ void			CEngine::sStartEngine()
 	// elargit l'image d'environ 3,6 % et comble ce bord avec de la marge.
 	// Les 80 degres du commentaire d'origine sont un ordre de grandeur
 	// (« 80 is okay »), pas une valeur imposee.
+#ifdef PORTMASTER
+	// 78 degres a 4:3 (ci-dessus). Plus large que 4:3 : meme champ vertical,
+	// plus de decor sur les cotes (Hor+). Plus etroit : la vue 4:3 reste
+	// entiere, avec plus de decor en haut et en bas.
+	{
+		const float k = g_thug_screen_aspect * 0.75f;
+		CViewportManager::sSetScreenAngle( Mth::RadToDeg( 2.0f * atanf(
+			tanf( Mth::DegToRad( 39.0f )) * ( k > 1.0f ? k : 1.0f ))));
+	}
+#else
 	CViewportManager::sSetScreenAngle( 78.0f );
+#endif
 #else
 	CViewportManager::sSetScreenAngle( 0.0f);		// set to default
 #endif
@@ -256,22 +278,46 @@ void			CEngine::sPostRender()
 /*                                                                */
 /******************************************************************/
 
+#ifdef PORTMASTER
+// R36S diagnostic: per-step time of the world update that runs before the
+// world render (the [ACC] "->monde" bracket, 4 ms in light views, 10 ms in
+// heavy NJ views). Logged every 120 frames under [SHD].
+static SceUInt64 s_maj_us[7];
+static int s_maj_img = 0;
+#define MAJ_T( i, appel ) do { const SceUInt64 t0_ = sceKernelGetProcessTimeWide(); appel; \
+	s_maj_us[i] += sceKernelGetProcessTimeWide() - t0_; } while( 0 )
+#else
+#define MAJ_T( i, appel ) appel
+#endif
+
 void			CEngine::sRenderWorld()
 {
-	process_particles( Tmr::FrameLength() ); 
+	MAJ_T( 0, process_particles( Tmr::FrameLength() ));
 
 	//ScreenFlashUpdate(); // lwss remove
-	TextureSplatUpdate();
-	ShatterUpdate();
-	
+	MAJ_T( 1, TextureSplatUpdate());
+	MAJ_T( 2, ShatterUpdate());
+
 	//CLightManager::sUpdateVCLights(); // lwss remove
-	
-	mp_particle_manager->UpdateParticles(); // lwss add
-	mp_weather->Process( Tmr::FrameLength() ); // lwss add
-	CEngine::sGetImposterManager()->ProcessImposters(); // lwss add
 
-	CLightManager::sUpdateVCLights(); // LWSS Add for PC
+	MAJ_T( 3, mp_particle_manager->UpdateParticles()); // lwss add
+	MAJ_T( 4, mp_weather->Process( Tmr::FrameLength() )); // lwss add
+	MAJ_T( 5, CEngine::sGetImposterManager()->ProcessImposters()); // lwss add
 
+	MAJ_T( 6, CLightManager::sUpdateVCLights()); // LWSS Add for PC
+
+#ifdef PORTMASTER
+	if(( ++s_maj_img % 120 ) == 0 )
+	{
+		VLOG( "SHD", "maj monde (ms/image) : particules %.2f | splats %.2f | eclats %.2f | "
+		             "particules param. %.2f | meteo %.2f | imposteurs %.2f | lumieres VC %.2f",
+		      s_maj_us[0] / 120000.0f, s_maj_us[1] / 120000.0f, s_maj_us[2] / 120000.0f,
+		      s_maj_us[3] / 120000.0f, s_maj_us[4] / 120000.0f, s_maj_us[5] / 120000.0f,
+		      s_maj_us[6] / 120000.0f );
+		for( int i = 0; i < 7; ++i )
+			s_maj_us[i] = 0;
+	}
+#endif
 	s_plat_render_world();
 }
 

@@ -141,6 +141,9 @@ struct SPrtSommet
 
 static SPrtSommet *		sp_sommets = NULL;
 static unsigned short *	sp_indices = NULL;
+#ifdef PORTMASTER
+static GLuint s_position_buffer = 0, s_uv_buffer = 0, s_color_buffer = 0, s_index_buffer = 0;
+#endif
 static bool				s_tampons_ok = false;
 
 // Chemin shader (prt 4) : 16 octets par sommet, identiques pour les 4 coins
@@ -201,9 +204,31 @@ static bool assurer_tampons( void )
 		s[2].u = 1.0f; s[2].v = 1.0f;
 		s[3].u = 0.0f; s[3].v = 1.0f;
 	}
+#ifdef PORTMASTER
+	glGenBuffers( 1, &s_position_buffer );
+	glGenBuffers( 1, &s_uv_buffer );
+	glGenBuffers( 1, &s_color_buffer );
+	glGenBuffers( 1, &s_index_buffer );
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, s_index_buffer );
+	glBufferData( GL_ELEMENT_ARRAY_BUFFER, sizeof( unsigned short ) * 6 * PRT_LOT, sp_indices, GL_STATIC_DRAW );
+	glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
+#endif
 	s_tampons_ok = true;
 	return true;
 }
+
+#ifdef PORTMASTER
+static void envoyer_sommets_cpu( int n )
+{
+	const size_t bytes = sizeof( SPrtSommet ) * 4 * n;
+	glBindBuffer( GL_ARRAY_BUFFER, s_position_buffer );
+	glBufferData( GL_ARRAY_BUFFER, bytes, sp_sommets, GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, s_uv_buffer );
+	glBufferData( GL_ARRAY_BUFFER, bytes - 12, (const char *)sp_sommets + 12, GL_STREAM_DRAW );
+	glBindBuffer( GL_ARRAY_BUFFER, s_color_buffer );
+	glBufferData( GL_ARRAY_BUFFER, bytes - 20, (const char *)sp_sommets + 20, GL_STREAM_DRAW );
+}
+#endif
 
 // [SOURCE] XBox/NX/render.cpp:119, GetBlendMode, ramene aux familles que le
 // rendu distingue ici.
@@ -866,7 +891,14 @@ void CVitaNewParticle::dessiner( void )
 			if( ++n_lot == PRT_LOT )
 			{
 				if( NxVita::g_vita_particules != 3 )	// 3 : calcul seul (mesure)
+				{
+#ifdef PORTMASTER
+					envoyer_sommets_cpu( n_lot );
+					glDrawElements( GL_TRIANGLES, n_lot * 6, GL_UNSIGNED_SHORT, (const void *)0 );
+#else
 					glDrawElements( GL_TRIANGLES, n_lot * 6, GL_UNSIGNED_SHORT, sp_indices );
+#endif
+				}
 				s_particules += n_lot;
 				++s_appels;
 				n_lot = 0;
@@ -880,7 +912,14 @@ void CVitaNewParticle::dessiner( void )
 	if( n_lot )
 	{
 		if( NxVita::g_vita_particules != 3 )	// 3 : calcul seul (mesure)
+		{
+#ifdef PORTMASTER
+			envoyer_sommets_cpu( n_lot );
+			glDrawElements( GL_TRIANGLES, n_lot * 6, GL_UNSIGNED_SHORT, (const void *)0 );
+#else
 			glDrawElements( GL_TRIANGLES, n_lot * 6, GL_UNSIGNED_SHORT, sp_indices );
+#endif
+		}
 		s_particules += n_lot;
 		++s_appels;
 	}
@@ -978,7 +1017,13 @@ void CVitaNewParticle::dessiner_shader( void )
 
 			if( ++n_lot == PRT_LOT )
 			{
+			{
+#ifdef PORTMASTER
+				glDrawRangeElements( GL_TRIANGLES, 0, n_lot * 4 - 1, n_lot * 6, GL_UNSIGNED_SHORT, (const void *)0 );
+#else
 				glDrawRangeElements( GL_TRIANGLES, 0, n_lot * 4 - 1, n_lot * 6, GL_UNSIGNED_SHORT, sp_indices );
+#endif
+			}
 				s_particules += n_lot;
 				++s_appels;
 				n_lot = 0;
@@ -991,7 +1036,13 @@ void CVitaNewParticle::dessiner_shader( void )
 	s_boucle_us += sceKernelGetProcessTimeWide() - t_boucle;
 	if( n_lot )
 	{
-		glDrawRangeElements( GL_TRIANGLES, 0, n_lot * 4 - 1, n_lot * 6, GL_UNSIGNED_SHORT, sp_indices );
+		{
+#ifdef PORTMASTER
+			glDrawRangeElements( GL_TRIANGLES, 0, n_lot * 4 - 1, n_lot * 6, GL_UNSIGNED_SHORT, (const void *)0 );
+#else
+			glDrawRangeElements( GL_TRIANGLES, 0, n_lot * 4 - 1, n_lot * 6, GL_UNSIGNED_SHORT, sp_indices );
+#endif
+		}
 		s_particules += n_lot;
 		++s_appels;
 	}
@@ -1096,8 +1147,13 @@ void CVitaNewParticleManager::RenderVita( void )
 		glEnable( GL_TEXTURE_2D );
 		glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
 
+#ifdef PORTMASTER
+		glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, s_index_buffer );
+		glBindBuffer( GL_ARRAY_BUFFER, s_shader_image ? 0 : s_position_buffer );
+#else
 		glBindBuffer( GL_ARRAY_BUFFER, 0 );
 		glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
+#endif
 		if( s_shader_image )
 		{
 			// mvp = projection x vue, en colonnes ; passee en quatre lignes.
@@ -1132,9 +1188,18 @@ void CVitaNewParticleManager::RenderVita( void )
 			glEnableClientState( GL_VERTEX_ARRAY );
 			glEnableClientState( GL_TEXTURE_COORD_ARRAY );
 			glEnableClientState( GL_COLOR_ARRAY );
+#ifdef PORTMASTER
+			glBindBuffer( GL_ARRAY_BUFFER, s_position_buffer );
+			glVertexPointer( 3, GL_FLOAT, sizeof( SPrtSommet ), (const void *)0 );
+			glBindBuffer( GL_ARRAY_BUFFER, s_uv_buffer );
+			glTexCoordPointer( 2, GL_FLOAT, sizeof( SPrtSommet ), (const void *)0 );
+			glBindBuffer( GL_ARRAY_BUFFER, s_color_buffer );
+			glColorPointer( 4, GL_UNSIGNED_BYTE, sizeof( SPrtSommet ), (const void *)0 );
+#else
 			glVertexPointer( 3, GL_FLOAT, sizeof( SPrtSommet ), &sp_sommets[0].x );
 			glTexCoordPointer( 2, GL_FLOAT, sizeof( SPrtSommet ), &sp_sommets[0].u );
 			glColorPointer( 4, GL_UNSIGNED_BYTE, sizeof( SPrtSommet ), sp_sommets[0].rgba );
+#endif
 			s_budget_restant = g_vita_prt_budget;
 			NxVita::BrouillardFixe( 1 );
 		}
@@ -1157,6 +1222,10 @@ void CVitaNewParticleManager::RenderVita( void )
 			glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 			glDisableClientState( GL_VERTEX_ARRAY );
 		}
+#ifdef PORTMASTER
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+		glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
+#endif
 		glBindTexture( GL_TEXTURE_2D, 0 );
 		glDisable( GL_TEXTURE_2D );
 		glBlendEquation( GL_FUNC_ADD );

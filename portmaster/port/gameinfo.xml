@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./THUG.sh</path>
+    <name>Tony Hawk's Underground</name>
+    <desc>Neversoft's 2003 skateboarding game. Rise from a New Jersey street skater to a pro in Story Mode, or skate the levels freely and build your own skater, tricks and parks.</desc>
+    <releasedate>20031027T000000</releasedate>
+    <developer>Neversoft</developer>
+    <publisher>Activision</publisher>
+    <genre>Sports</genre>
+    <image>./thug/screenshot.png</image>
+  </game>
+</gameList>

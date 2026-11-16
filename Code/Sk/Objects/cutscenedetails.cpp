@@ -73,6 +73,10 @@
 **								   Defines									**
 *****************************************************************************/
 
+#ifdef PORTMASTER
+namespace Nx { void VitaLibererDifferes( void ); }
+#endif
+
 // make sure the texture dictionary offsets don't
 // clash with skater's texture dictionaries
 // in case we're using actual skater assets
@@ -5238,6 +5242,12 @@ void CCutsceneDetails::Cleanup()
 	// aborted while they were still taking effect during the cutscene
 	// (in which case the fake lights would have gone on the cutscene heap)
 	Nx::CLightManager::sClearCurrentFakeLightsCommand();
+
+#ifdef PORTMASTER
+	// The renderer queues destruction until the next frame. Flush while the
+	// cutscene's mesh and texture objects still have valid storage.
+	Nx::VitaLibererDifferes();
+#endif
 
 	// destroy the cutscene heap (at this point, any allocations made during 
 	// the cutscene should have been freed up)

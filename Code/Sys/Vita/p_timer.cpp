@@ -16,12 +16,22 @@
 
 #include <psp2/kernel/processmgr.h>
 
+#ifdef PORTMASTER
+#include <stdlib.h>
+#include <string.h>
+// portmaster_platform.cpp : periode de rafraichissement en vsync, 0 sinon.
+extern "C" unsigned g_thug_vblank_us;
+#endif
+
 namespace Tmr
 {
 
 // Le moteur travaille en millisecondes (Time = uint32, cf. sys/timer.h).
 static SceUInt64	s_start_us			= 0;
 static uint64		s_vblanks			= 0;
+#ifdef PORTMASTER
+static uint64 s_render_frame = 0;
+#endif
 
 // Durée de la frame précédente, en secondes — c'est l'unité qu'attend le
 // moteur (FrameLength() est multiplié par des vitesses en unités/seconde).
@@ -48,6 +58,9 @@ void	Init( void )
 	s_start_us		= now_us();
 	s_last_frame_us	= s_start_us;
 	s_vblanks		= 0;
+#ifdef PORTMASTER
+	s_render_frame = 0;
+#endif
 	s_slomo			= 1.0f;
 }
 
@@ -126,16 +139,54 @@ static int		s_render_index = 0;
 // l'humain (« les animations tournent au ralenti »). On garde le lissage sur
 // 4 images de la Xbox, mais en vsync FRACTIONNAIRES : la somme des pas suit
 // exactement le temps ecoule.
+#ifdef PORTMASTER
+uint64 GetRenderFrame()
+{
+	return s_render_frame;
+}
+#endif
+
 void	OncePerRender()
 {
+#ifdef PORTMASTER
+	++s_render_frame;
+#endif
 	SceUInt64 t	= now_us();
 	SceUInt64 dt = t - s_last_frame_us;
 	s_last_frame_us = t;
 
-	float diff = (float)dt / 16666.667f;
 	// Issue #17 : toute image longue est tracee (hors chargements, > 1 s).
 	if(( dt > 50000 ) && ( dt < 1000000 ))
 		VLOG( "PERF", "image longue : %.1f ms", (float)dt / 1000.0f );
+	float plancher = 1.0f;		// pas minimal, en 1/60 s
+#ifdef PORTMASTER
+	// R36S, presentation en vsync sans plafond (THUG_PACING_MODE=vsync, defaut) :
+	// chaque image reste un nombre ENTIER de rafraichissements de 77 Hz. On
+	// arrondit la duree mesuree a ce nombre (la gigue du minuteur ne fait plus
+	// varier le pas quand la cadence est stable) et le plancher devient UN
+	// rafraichissement (13 ms) au lieu de 1/60 s, sinon le jeu tournerait 28 %
+	// trop vite a 77 images/s. Lissage Xbox sur 4 images garde.
+	// THUG_DT_VBLANK=0 : mesure brute et plancher 1/60 s, comme avant.
+	{
+		static int s_dt_vblank = -1;
+		if( s_dt_vblank < 0 )
+		{
+			const char *e = getenv( "THUG_DT_VBLANK" );
+			s_dt_vblank = !( e && ( strcmp( e, "0" ) == 0 ));
+		}
+		const unsigned vb = g_thug_vblank_us;
+		if( s_dt_vblank && vb )
+		{
+			SceUInt64 n = ( dt + vb / 2 ) / vb;
+			if( n < 1 )
+				n = 1;
+			if( dt < 1000000 )		// chargements : laisses au filtre ci-dessous
+				dt = n * vb;
+			plancher = (float)vb / 16666.667f;
+		}
+	}
+#endif
+	float diff = (float)dt / 16666.667f;
 	s_render_buffer[s_render_index] = diff;
 	if( ++s_render_index == vSMOOTH_N )
 		s_render_index = 0;
@@ -152,8 +203,8 @@ void	OncePerRender()
 		total += d;
 	}
 	float render_length = total / (float)vSMOOTH_N;
-	if( render_length < 1.0f )
-		render_length = 1.0f;
+	if( render_length < plancher )
+		render_length = plancher;
 
 	s_frame_length    = render_length / 60.0f;
 	s_uncapped_length = ((double)uncapped_total / (double)vSMOOTH_N ) / 60.0;

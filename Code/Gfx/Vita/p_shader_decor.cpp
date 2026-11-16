@@ -147,6 +147,15 @@ static void ecrire_cache( GLuint sh, unsigned long long h )
 
 static GLuint compiler( GLenum type, const char *p_source, const char *p_nom )
 {
+#ifdef PORTMASTER
+	GLuint sh = glCreateShader( type == GL_CG_VERTEX_SHADER_EXT ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER );
+	if( !sh || !portmaster_shader_source( sh, type, p_source, p_nom ))
+	{
+		VLOG( "SHD", "Unsupported shader interface: %s", p_nom );
+		glDeleteShader( sh );
+		return 0;
+	}
+#else
 	const unsigned long long h = empreinte( p_source, type );
 	GLuint sh = charger_cache( type, h );
 	if( sh )
@@ -154,6 +163,7 @@ static GLuint compiler( GLenum type, const char *p_source, const char *p_nom )
 
 	sh = glCreateShader( type );
 	glShaderSource( sh, 1, &p_source, NULL );
+#endif
 	glCompileShader( sh );
 	GLint ok = 0;
 	glGetShaderiv( sh, GL_COMPILE_STATUS, &ok );
@@ -168,7 +178,9 @@ static GLuint compiler( GLenum type, const char *p_source, const char *p_nom )
 		glDeleteShader( sh );
 		return 0;
 	}
+#ifndef PORTMASTER
 	ecrire_cache( sh, h );
+#endif
 	return sh;
 }
 
@@ -217,8 +229,59 @@ bool ShaderDecorPret()
 	return true;
 }
 
+#ifdef PORTMASTER
+// gl4es (fpe.c, realize_glenv) : GL_ALPHA_TEST laisse actif par le pipeline
+// fixe pendant un dessin GLSL fait passer le programme par une copie
+// "personnalisee" (fpe_CustomShader) et fpe_SyncUniforms a CHAQUE dessin, avec
+// un second test alpha sur une reference perimee. Nos shaders font deja leur
+// seuil (uSeuil), comme sur Vita ou vitaGL n'applique pas le test alpha fixe
+// aux shaders. THUG_GL4ES_NEUTRAL=0 : comportement d'avant.
+static int  s_neutre = -1;
+static int  s_neutre_niveau = 0;
+static bool s_neutre_alpha = false;
+static unsigned s_neutre_sections = 0, s_neutre_coupes = 0, s_neutre_image = 0;
+void Gl4esNeutreDebut( void )
+{
+	if( s_neutre < 0 )
+	{
+		const char *e = getenv( "THUG_GL4ES_NEUTRAL" );
+		s_neutre = !( e && ( strcmp( e, "0" ) == 0 ));
+		VLOG( "SHD", "gl4es : test alpha fixe coupe pendant les shaders : %s (THUG_GL4ES_NEUTRAL)",
+		        s_neutre ? "oui" : "non" );
+	}
+	if( !s_neutre || ( s_neutre_niveau++ > 0 ))
+		return;
+	++s_neutre_sections;
+	s_neutre_alpha = glIsEnabled( GL_ALPHA_TEST ) != GL_FALSE;
+	if( s_neutre_alpha )
+	{
+		glDisable( GL_ALPHA_TEST );
+		++s_neutre_coupes;
+	}
+	if( vgl_framecount / 120 != s_neutre_image )
+	{
+		s_neutre_image = vgl_framecount / 120;
+		VLOG( "SHD", "gl4es neutre : %u sections GLSL / 120 images, %u avec test alpha fixe coupe",
+		        s_neutre_sections, s_neutre_coupes );
+		s_neutre_sections = s_neutre_coupes = 0;
+	}
+}
+void Gl4esNeutreFin( void )
+{
+	if( !s_neutre || ( s_neutre_niveau <= 0 ) || ( --s_neutre_niveau > 0 ))
+		return;
+	if( s_neutre_alpha )
+		glEnable( GL_ALPHA_TEST );
+	s_neutre_alpha = false;
+}
+#else
+void Gl4esNeutreDebut( void ) {}
+void Gl4esNeutreFin( void ) {}
+#endif
+
 void ShaderDecorDebut( const float *mvp )
 {
+	Gl4esNeutreDebut();
 	glUseProgram( s_prog );
 	// Lignes de la matrice : mvp est en colonnes (OpenGL), la ligne r est
 	// donc ( m[r], m[4 + r], m[8 + r], m[12 + r] ).
@@ -260,6 +323,7 @@ void ShaderDecorFin()
 	glDisableVertexAttribArray( ATTR_UV );
 	glDisableVertexAttribArray( ATTR_COULEUR );
 	glUseProgram( 0 );
+	Gl4esNeutreFin();
 }
 
 
@@ -328,6 +392,16 @@ struct SVarianteMateriau
 	float  c_pose[4][4];	// dernieres couleurs envoyees (evite les renvois)
 	GLint  fogp, fogc;		// uFogP, uFogC (issue #45)
 	float  fog_pose[8];		// dernieres valeurs envoyees
+	GLint  v[3];			// uV0..2, vue (reflet en GLSL, PortMaster)
+	GLint  e[4];			// uE0..3, tuilage du reflet par passe
+	// Chemin GLES direct (PortMaster, THUG_DIRECT_GL) : programme REEL compile
+	// depuis le GLSL ES que gl4es a produit pour vs_gl/fs_gl, avec ses propres
+	// emplacements et son propre cache d'uniformes.
+	int    d_etat;			// 0 pas essaye, 1 pret, -1 refuse
+	GLuint d_prog;
+	GLint  d_l[4], d_c[4], d_seuil, d_fogp, d_fogc, d_v[3], d_e[4], d_w[4];
+	unsigned d_section;		// section ou uL/uV ont ete poses
+	float  d_c_pose[4][4], d_fog_pose[8], d_seuil_pose;
 };
 
 // La table n'est jamais videe d'un niveau a l'autre : 128 debordait apres
@@ -342,6 +416,28 @@ static const float *sp_mvp = NULL;
 static bool   s_echec_m = false;
 static bool   s_en_prechargement = false;
 static int    s_uv_actifs = 0;	// attributs d'UV actuellement actives
+#ifdef PORTMASTER
+// Reflet (issue #5) par le shader materiau GLSL : sans GXM, les lots a reflet
+// etaient refuses (opaques jamais dessines, translucides un par un en pipeline
+// fixe). Meme vertex shader que GXM (vertex_shader_m). THUG_GLSL_ENV=0 : refus
+// comme avant.
+enum { ATTR_NORMALE_M = 6 };
+static const float *sp_vue_glsl = NULL;
+static int s_env_glsl = -1;
+bool ShaderMateriauEnvGlsl( void )
+{
+	if( s_env_glsl < 0 )
+	{
+		const char *e = getenv( "THUG_GLSL_ENV" );
+		s_env_glsl = !( e && ( strcmp( e, "0" ) == 0 ));
+		VLOG( "SHD", "reflets par le shader materiau GLSL : %s (THUG_GLSL_ENV)",
+		        s_env_glsl ? "oui" : "non" );
+	}
+	return s_env_glsl != 0;
+}
+#else
+bool ShaderMateriauEnvGlsl( void ) { return false; }
+#endif
 
 enum { ATTR_UV3 = 4, ATTR_UV4 = 5 };
 
@@ -581,6 +677,8 @@ static const SVarianteMateriau *variante( const SShaderMateriau *p )
 	v->env    = p->env & (( 1u << p->passes ) - 1 );
 	v->wib    = p->wib & ~v->env & (( 1u << p->passes ) - 1 );
 	v->gxm = NULL;
+	v->d_etat = 0;
+	v->d_prog = 0;
 	v->prog = glCreateProgram();
 	glAttachShader( v->prog, vs );
 	glAttachShader( v->prog, fs );
@@ -591,6 +689,10 @@ static const SVarianteMateriau *variante( const SShaderMateriau *p )
 	for( int q = 0; q < p->passes; ++q )
 		if( !( p->env & ( 1u << q )))
 			glBindAttribLocation( v->prog, attr_uv[q], noms_in[q] );
+#ifdef PORTMASTER
+	if( v->env )
+		glBindAttribLocation( v->prog, ATTR_NORMALE_M, "aNormal" );
+#endif
 	glLinkProgram( v->prog );
 	GLint ok = 0;
 	glGetProgramiv( v->prog, GL_LINK_STATUS, &ok );
@@ -609,6 +711,14 @@ static const SVarianteMateriau *variante( const SShaderMateriau *p )
 		v->c[q] = ( q < p->passes ) ? glGetUniformLocation( v->prog, noms_c[q] ) : -1;
 	}
 	v->seuil = glGetUniformLocation( v->prog, "uSeuil" );
+	{
+		static const char *noms_v[3] = { "uV0", "uV1", "uV2" };
+		static const char *noms_e[4] = { "uE0", "uE1", "uE2", "uE3" };
+		for( int q = 0; q < 3; ++q )
+			v->v[q] = v->env ? glGetUniformLocation( v->prog, noms_v[q] ) : -1;
+		for( int q = 0; q < 4; ++q )
+			v->e[q] = ( v->env & ( 1u << q )) ? glGetUniformLocation( v->prog, noms_e[q] ) : -1;
+	}
 	v->fogp  = glGetUniformLocation( v->prog, "uFogP" );
 	v->fogc  = glGetUniformLocation( v->prog, "uFogC" );
 	for( int k = 0; k < 8; ++k )
@@ -635,13 +745,23 @@ static const SVarianteMateriau *variante( const SShaderMateriau *p )
 
 // Compile au chargement la variante qu'un dessin demandera (issue #17) : sans
 // cela, la premiere apparition d'un materiau figeait une image 160-180 ms.
+#ifdef PORTMASTER
+static void direct_precompiler( SVarianteMateriau *v );
+#endif
 void ShaderMateriauPrecompiler( const SShaderMateriau *p )
 {
 	if( s_echec_m )
 		return;
 	s_en_prechargement = true;
-	variante( p );
+	SVarianteMateriau *v = (SVarianteMateriau *)variante( p );
 	s_en_prechargement = false;
+#ifdef PORTMASTER
+	// R36S : le programme REEL du chemin direct aussi, au chargement. Compile
+	// au premier dessin, il figeait l'image (675 ms a l'entree de NJ, puis
+	// 70-190 ms a chaque nouveau materiau). glUseProgram reel : etat gl4es rendu.
+	if( v )
+		direct_precompiler( v );
+#endif
 }
 
 int ShaderMateriauNombreVariantes()
@@ -654,8 +774,491 @@ bool ShaderMateriauPret()
 	return !s_echec_m;
 }
 
+#ifdef PORTMASTER
+static unsigned int s_materiau_vao_cour = 0;
+static bool materiau_vao_actif()
+{
+	static int value = -1;
+	if( value < 0 )
+	{
+		const char *setting = getenv( "THUG_WORLD_VAO" );
+		value = !setting || strcmp( setting, "0" ) != 0;
+		VLOG( "SHD", "PortMaster world vertex cache: %s", value ? "enabled" : "disabled" );
+	}
+	return value != 0;
+}
+#endif
+
+
+#ifdef PORTMASTER
+// --- Chemin GLES direct des lots (R36S) --------------------------------------
+//
+// Mesure (appareil) : 55-80 us par appel de lot via vitaGL-style -> gl4es ->
+// GLES, contre 22-34 us sur les portages NFS en GLES natif. Ici les lots du
+// decor sont dessines par des appels GLES REELS : programme reel (meme source
+// GLSL ES que gl4es), un VAO reel par lot, adressage par objets sampler (l'etat
+// des textures gl4es n'est jamais touche). En fin de section,
+// gl4es_thug_restore remet l'etat reel que gl4es croit avoir (programme,
+// unite active, textures 2D, GL_ARRAY_BUFFER) ; VAO 0 et samplers 0 sont
+// remis ici. Une section se ferme a ShaderMateriauFin et avant tout dessin
+// par gl4es. THUG_DIRECT_GL=0 : tout par gl4es, comme avant.
+extern "C" {
+void *gl4es_thug_real_proc( const char *name ) __attribute__(( weak ));
+int gl4es_thug_tex( GLuint name, GLuint *real, GLenum *minf, GLenum *magf ) __attribute__(( weak ));
+GLuint gl4es_thug_buf( GLuint name ) __attribute__(( weak ));
+const char *gl4es_thug_shader_es( GLuint shader ) __attribute__(( weak ));
+void gl4es_thug_restore( int units ) __attribute__(( weak ));
+}
+
+namespace
+{
+struct SGlReel
+{
+	void   ( *UseProgram )( GLuint );
+	void   ( *Uniform4f )( GLint, GLfloat, GLfloat, GLfloat, GLfloat );
+	void   ( *Uniform1f )( GLint, GLfloat );
+	void   ( *Uniform1i )( GLint, GLint );
+	void   ( *ActiveTexture )( GLenum );
+	void   ( *BindTexture )( GLenum, GLuint );
+	void   ( *GenSamplers )( GLsizei, GLuint * );
+	void   ( *BindSampler )( GLuint, GLuint );
+	void   ( *SamplerParameteri )( GLuint, GLenum, GLint );
+	void   ( *GenVertexArrays )( GLsizei, GLuint * );
+	void   ( *BindVertexArray )( GLuint );
+	void   ( *DeleteVertexArrays )( GLsizei, const GLuint * );
+	void   ( *EnableVertexAttribArray )( GLuint );
+	void   ( *VertexAttribPointer )( GLuint, GLint, GLenum, GLboolean, GLsizei, const void * );
+	void   ( *BindBuffer )( GLenum, GLuint );
+	void   ( *DrawElements )( GLenum, GLsizei, GLenum, const void * );
+	GLuint ( *CreateShader )( GLenum );
+	void   ( *ShaderSource )( GLuint, GLsizei, const GLchar *const *, const GLint * );
+	void   ( *CompileShader )( GLuint );
+	void   ( *GetShaderiv )( GLuint, GLenum, GLint * );
+	void   ( *GetShaderInfoLog )( GLuint, GLsizei, GLsizei *, GLchar * );
+	GLuint ( *CreateProgram )( void );
+	void   ( *AttachShader )( GLuint, GLuint );
+	void   ( *BindAttribLocation )( GLuint, GLuint, const GLchar * );
+	void   ( *LinkProgram )( GLuint );
+	void   ( *GetProgramiv )( GLuint, GLenum, GLint * );
+	GLint  ( *GetUniformLocation )( GLuint, const GLchar * );
+	const GLubyte *( *GetString )( GLenum );
+};
+SGlReel R;
+int  s_direct = -1;				// -1 inconnu, 0 coupe, 1 actif
+bool s_dsec = false;			// section directe ouverte
+unsigned s_dsec_id = 0;
+int  s_dunits = 0;				// unites de texture touchees dans la section
+GLuint s_dprog = 0;
+int  s_dactive = -1;
+GLuint s_dtex[4], s_dsamp[4];
+unsigned s_d_lots = 0, s_d_repli = 0, s_d_sections = 0, s_d_image = 0;
+
+struct SSamplerReel { GLenum minf, magf; unsigned char u, v; GLuint id; };
+SSamplerReel s_samplers[32];
+int s_nb_samplers = 0;
+
+template< typename T > bool charger( T &f, const char *nom )
+{
+	f = reinterpret_cast< T >( gl4es_thug_real_proc( nom ));
+	return f != NULL;
+}
+}
+
+bool ShaderMateriauDirectActif( void )
+{
+	if( s_direct >= 0 )
+		return s_direct == 1;
+	const char *e = getenv( "THUG_DIRECT_GL" );
+	s_direct = 0;
+	if( e && ( strcmp( e, "0" ) == 0 ))
+	{
+		VLOG( "SHD", "lots en GLES direct : non (THUG_DIRECT_GL=0)" );
+		return false;
+	}
+	if( !gl4es_thug_real_proc || !gl4es_thug_tex || !gl4es_thug_buf || !gl4es_thug_shader_es
+	    || !gl4es_thug_restore )
+	{
+		VLOG( "SHD", "lots en GLES direct : non (gl4es sans le correctif THUG)" );
+		return false;
+	}
+	bool ok = charger( R.UseProgram, "glUseProgram" ) && charger( R.Uniform4f, "glUniform4f" )
+	    && charger( R.Uniform1f, "glUniform1f" ) && charger( R.Uniform1i, "glUniform1i" )
+	    && charger( R.ActiveTexture, "glActiveTexture" ) && charger( R.BindTexture, "glBindTexture" )
+	    && charger( R.GenSamplers, "glGenSamplers" ) && charger( R.BindSampler, "glBindSampler" )
+	    && charger( R.SamplerParameteri, "glSamplerParameteri" )
+	    && charger( R.GenVertexArrays, "glGenVertexArrays" ) && charger( R.BindVertexArray, "glBindVertexArray" )
+	    && charger( R.DeleteVertexArrays, "glDeleteVertexArrays" )
+	    && charger( R.EnableVertexAttribArray, "glEnableVertexAttribArray" )
+	    && charger( R.VertexAttribPointer, "glVertexAttribPointer" ) && charger( R.BindBuffer, "glBindBuffer" )
+	    && charger( R.DrawElements, "glDrawElements" ) && charger( R.CreateShader, "glCreateShader" )
+	    && charger( R.ShaderSource, "glShaderSource" ) && charger( R.CompileShader, "glCompileShader" )
+	    && charger( R.GetShaderiv, "glGetShaderiv" ) && charger( R.GetShaderInfoLog, "glGetShaderInfoLog" )
+	    && charger( R.CreateProgram, "glCreateProgram" ) && charger( R.AttachShader, "glAttachShader" )
+	    && charger( R.BindAttribLocation, "glBindAttribLocation" ) && charger( R.LinkProgram, "glLinkProgram" )
+	    && charger( R.GetProgramiv, "glGetProgramiv" ) && charger( R.GetUniformLocation, "glGetUniformLocation" )
+	    && charger( R.GetString, "glGetString" );
+	const char *version = ok ? (const char *)R.GetString( GL_VERSION ) : NULL;
+	if( !version || !strstr( version, "OpenGL ES 3" ))
+	{
+		VLOG( "SHD", "lots en GLES direct : non (%s)", version ? version : "fonctions GLES 3 absentes" );
+		return false;
+	}
+	s_direct = 1;
+	VLOG( "SHD", "lots en GLES direct : oui (%s, THUG_DIRECT_GL)", version );
+	return true;
+}
+
+static GLuint direct_sampler( GLenum minf, GLenum magf, unsigned char u, unsigned char v )
+{
+	for( int i = 0; i < s_nb_samplers; ++i )
+		if(( s_samplers[i].minf == minf ) && ( s_samplers[i].magf == magf )
+		    && ( s_samplers[i].u == u ) && ( s_samplers[i].v == v ))
+			return s_samplers[i].id;
+	if( s_nb_samplers == (int)( sizeof( s_samplers ) / sizeof( s_samplers[0] )))
+		return 0;
+	GLuint id = 0;
+	R.GenSamplers( 1, &id );
+	if( !id )
+		return 0;
+	R.SamplerParameteri( id, GL_TEXTURE_MIN_FILTER, minf );
+	R.SamplerParameteri( id, GL_TEXTURE_MAG_FILTER, magf );
+	R.SamplerParameteri( id, GL_TEXTURE_WRAP_S, u ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	R.SamplerParameteri( id, GL_TEXTURE_WRAP_T, v ? GL_CLAMP_TO_EDGE : GL_REPEAT );
+	SSamplerReel &e = s_samplers[s_nb_samplers++];
+	e.minf = minf; e.magf = magf; e.u = u; e.v = v; e.id = id;
+	return id;
+}
+
+static GLuint direct_shader( GLenum type, GLuint gl4es_shader )
+{
+	const char *src = gl4es_thug_shader_es( gl4es_shader );
+	if( !src )
+		return 0;
+	GLuint sh = R.CreateShader( type );
+	R.ShaderSource( sh, 1, &src, NULL );
+	R.CompileShader( sh );
+	GLint ok = 0;
+	R.GetShaderiv( sh, GL_COMPILE_STATUS, &ok );
+	if( !ok )
+	{
+		char log[512] = "";
+		R.GetShaderInfoLog( sh, sizeof( log ), NULL, log );
+		VLOG( "SHD", "!! GLES direct : shader refuse : %s", log );
+		return 0;
+	}
+	return sh;
+}
+
+static bool direct_programme( SVarianteMateriau *v )
+{
+	if( v->d_etat )
+		return v->d_etat > 0;
+	v->d_etat = -1;
+	// Vertex shaders partages entre variantes (meme vs_gl gl4es) : compiles
+	// une fois (moitie du temps de chargement ajoute par la precompilation).
+	static GLuint s_vs_cle[64], s_vs_reel[64];
+	static int s_vs_n = 0;
+	GLuint vs = 0;
+	for( int i = 0; i < s_vs_n; ++i )
+		if( s_vs_cle[i] == v->vs_gl )
+			vs = s_vs_reel[i];
+	if( !vs )
+	{
+		vs = direct_shader( GL_VERTEX_SHADER, v->vs_gl );
+		if( vs && ( s_vs_n < 64 ))
+		{
+			s_vs_cle[s_vs_n] = v->vs_gl;
+			s_vs_reel[s_vs_n] = vs;
+			++s_vs_n;
+		}
+	}
+	const GLuint fs = direct_shader( GL_FRAGMENT_SHADER, v->fs_gl );
+	if( !vs || !fs )
+		return false;
+	const GLuint prog = R.CreateProgram();
+	R.AttachShader( prog, vs );
+	R.AttachShader( prog, fs );
+	R.BindAttribLocation( prog, ATTR_POSITION, "aPosition" );
+	R.BindAttribLocation( prog, ATTR_COULEUR, "aColor" );
+	static const char *noms_in[4] = { "aTexcoord", "aTexcoord2", "aTexcoord3", "aTexcoord4" };
+	static const int   attr_uv[4] = { ATTR_UV, ATTR_UV2, ATTR_UV3, ATTR_UV4 };
+	for( int q = 0; q < v->passes; ++q )
+		if( !( v->env & ( 1u << q )))
+			R.BindAttribLocation( prog, attr_uv[q], noms_in[q] );
+	if( v->env )
+		R.BindAttribLocation( prog, ATTR_NORMALE_M, "aNormal" );
+	R.LinkProgram( prog );
+	GLint ok = 0;
+	R.GetProgramiv( prog, GL_LINK_STATUS, &ok );
+	if( !ok )
+	{
+		VLOG( "SHD", "!! GLES direct : edition de liens refusee (cle %08x)", (unsigned)v->cle );
+		return false;
+	}
+	static const char *noms_l[4] = { "uL0", "uL1", "uL2", "uL3" };
+	static const char *noms_c[4] = { "uC0", "uC1", "uC2", "uC3" };
+	static const char *noms_t[4] = { "uTex0", "uTex1", "uTex2", "uTex3" };
+	static const char *noms_v[3] = { "uV0", "uV1", "uV2" };
+	static const char *noms_e[4] = { "uE0", "uE1", "uE2", "uE3" };
+	static const char *noms_w[4] = { "uW0", "uW1", "uW2", "uW3" };
+	for( int q = 0; q < 4; ++q )
+	{
+		v->d_l[q] = R.GetUniformLocation( prog, noms_l[q] );
+		v->d_c[q] = ( q < v->passes ) ? R.GetUniformLocation( prog, noms_c[q] ) : -1;
+		v->d_e[q] = ( v->env & ( 1u << q )) ? R.GetUniformLocation( prog, noms_e[q] ) : -1;
+		v->d_w[q] = ( v->wib & ( 1u << q )) ? R.GetUniformLocation( prog, noms_w[q] ) : -1;
+	}
+	for( int q = 0; q < 3; ++q )
+		v->d_v[q] = v->env ? R.GetUniformLocation( prog, noms_v[q] ) : -1;
+	v->d_seuil = R.GetUniformLocation( prog, "uSeuil" );
+	v->d_fogp  = R.GetUniformLocation( prog, "uFogP" );
+	v->d_fogc  = R.GetUniformLocation( prog, "uFogC" );
+	R.UseProgram( prog );
+	for( int q = 0; q < v->passes; ++q )
+		R.Uniform1i( R.GetUniformLocation( prog, noms_t[q] ), q );
+	s_dprog = prog;		// la section courante (s'il y en a une) suit
+	for( int q = 0; q < 4; ++q )
+		for( int w = 0; w < 4; ++w )
+			v->d_c_pose[q][w] = -1.0f;
+	for( int k = 0; k < 8; ++k )
+		v->d_fog_pose[k] = -1.0f;
+	v->d_seuil_pose = -1.0f;
+	v->d_section = 0;
+	v->d_prog = prog;
+	v->d_etat = 1;
+	VLOG( "SHD", "GLES direct : programme %u pour la variante %08x", prog, (unsigned)v->cle );
+	return true;
+}
+
+static void direct_precompiler( SVarianteMateriau *v )
+{
+	if( !ShaderMateriauDirectActif() || v->d_etat )
+		return;
+	const bool sec = s_dsec;
+	direct_programme( v );
+	if( !sec )
+		gl4es_thug_restore( 0 );		// programme reel, unite active, GL_ARRAY_BUFFER
+}
+
+void ShaderMateriauDirectFin( void )
+{
+	if( !s_dsec )
+		return;
+	s_dsec = false;
+	R.BindVertexArray( 0 );
+	for( int u = 0; u < s_dunits; ++u )
+		if( s_dsamp[u] )
+		{
+			if( s_dactive != u )
+			{
+				R.ActiveTexture( GL_TEXTURE0 + u );
+				s_dactive = u;
+			}
+			R.BindSampler( u, 0 );
+		}
+	gl4es_thug_restore( s_dunits );
+}
+
+void ShaderMateriauDirectLiberer( unsigned int vao )
+{
+	if(( s_direct == 1 ) && vao && ( vao != ~0u ))
+		R.DeleteVertexArrays( 1, &vao );
+}
+
+bool ShaderMateriauDirectLot( const SShaderMateriau *p, const unsigned int *tex,
+                              const unsigned char *au, const unsigned char *av, unsigned int ibo,
+                              unsigned int *p_vao, const int *first, const int *count, int n,
+                              unsigned int mode )
+{
+	if( vgl_framecount / 120 != s_d_image )
+	{
+		s_d_image = vgl_framecount / 120;
+		VLOG( "SHD", "GLES direct : %u lots / 120 images, %u par gl4es (repli), %u sections",
+		      s_d_lots, s_d_repli, s_d_sections );
+		s_d_lots = s_d_repli = s_d_sections = 0;
+	}
+	if( !ShaderMateriauDirectActif() || ( *p_vao == ~0u ))
+	{
+		++s_d_repli;
+		return false;
+	}
+	// Section ouverte AVANT toute commande reelle (programme, sampler) :
+	// un repli rend la main via ShaderMateriauDirectFin, qui restaure.
+	if( !s_dsec )
+	{
+		s_dsec = true;
+		++s_dsec_id;
+		++s_d_sections;
+		s_dunits = 0;
+		s_dprog = 0;
+		s_dactive = -1;
+		for( int u = 0; u < 4; ++u )
+			s_dtex[u] = s_dsamp[u] = ~0u;
+	}
+	SVarianteMateriau *v = (SVarianteMateriau *)variante( p );
+	if( !v || !direct_programme( v ) || ( v->env && ( !sp_vue_glsl || !p->nbo )))
+	{
+		++s_d_repli;
+		return false;
+	}
+	GLuint reel[4];
+	GLuint samp[4];
+	for( int k = 0; k < p->passes; ++k )
+	{
+		GLenum minf, magf;
+		if( !gl4es_thug_tex( tex[k], &reel[k], &minf, &magf ))
+		{
+			++s_d_repli;
+			return false;
+		}
+		samp[k] = direct_sampler( minf, magf, au[k], av[k] );
+		if( !samp[k] )
+		{
+			++s_d_repli;
+			return false;
+		}
+	}
+	// VAO reel du lot, construit au premier dessin.
+	if( !*p_vao )
+	{
+		static const int attr_uv[4] = { ATTR_UV, ATTR_UV2, ATTR_UV3, ATTR_UV4 };
+		GLuint b_pos = gl4es_thug_buf( p->vbo ), b_col = gl4es_thug_buf( p->cbo );
+		GLuint b_ibo = gl4es_thug_buf( ibo ), b_nrm = v->env ? gl4es_thug_buf( p->nbo ) : 0;
+		GLuint b_uv[4] = { 0, 0, 0, 0 };
+		bool ok = b_pos && b_col && b_ibo && ( !v->env || b_nrm );
+		for( int k = 0; ok && ( k < p->passes ); ++k )
+			if( !( v->env & ( 1u << k )))
+			{
+				b_uv[k] = gl4es_thug_buf( p->uvbo[k] );
+				ok = b_uv[k] != 0;
+			}
+		if( !ok )
+		{
+			*p_vao = ~0u;		// jamais en direct : tampons sans equivalent reel
+			++s_d_repli;
+			return false;
+		}
+		GLuint vao = 0;
+		R.GenVertexArrays( 1, &vao );
+		R.BindVertexArray( vao );
+		R.EnableVertexAttribArray( ATTR_POSITION );
+		R.BindBuffer( GL_ARRAY_BUFFER, b_pos );
+		R.VertexAttribPointer( ATTR_POSITION, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+		R.EnableVertexAttribArray( ATTR_COULEUR );
+		R.BindBuffer( GL_ARRAY_BUFFER, b_col );
+		R.VertexAttribPointer( ATTR_COULEUR, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, NULL );
+		for( int k = 0; k < p->passes; ++k )
+			if( b_uv[k] )
+			{
+				R.EnableVertexAttribArray( attr_uv[k] );
+				R.BindBuffer( GL_ARRAY_BUFFER, b_uv[k] );
+				R.VertexAttribPointer( attr_uv[k], 2, GL_FLOAT, GL_FALSE, 0, NULL );
+			}
+		if( b_nrm )
+		{
+			R.EnableVertexAttribArray( ATTR_NORMALE_M );
+			R.BindBuffer( GL_ARRAY_BUFFER, b_nrm );
+			R.VertexAttribPointer( ATTR_NORMALE_M, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+		}
+		R.BindBuffer( GL_ELEMENT_ARRAY_BUFFER, b_ibo );
+		*p_vao = vao;
+	}
+	else
+		R.BindVertexArray( *p_vao );
+	// Programme et uniformes (cache propre au programme reel).
+	if( s_dprog != v->d_prog )
+	{
+		R.UseProgram( v->d_prog );
+		s_dprog = v->d_prog;
+	}
+	if( v->d_section != s_dsec_id )
+	{
+		v->d_section = s_dsec_id;
+		for( int r = 0; r < 4; ++r )
+			R.Uniform4f( v->d_l[r], sp_mvp[r], sp_mvp[4 + r], sp_mvp[8 + r], sp_mvp[12 + r] );
+		if( v->env )
+			for( int r = 0; r < 3; ++r )
+				R.Uniform4f( v->d_v[r], sp_vue_glsl[r], sp_vue_glsl[4 + r], sp_vue_glsl[8 + r],
+				             sp_vue_glsl[12 + r] );
+	}
+	for( int k = 0; k < p->passes; ++k )
+		if( memcmp( v->d_c_pose[k], p->c[k], sizeof( float ) * 4 ) != 0 )
+		{
+			R.Uniform4f( v->d_c[k], p->c[k][0], p->c[k][1], p->c[k][2], p->c[k][3] );
+			memcpy( v->d_c_pose[k], p->c[k], sizeof( float ) * 4 );
+		}
+	if(( p->seuil > 0.0f ) && ( p->seuil != v->d_seuil_pose ))
+	{
+		R.Uniform1f( v->d_seuil, p->seuil );
+		v->d_seuil_pose = p->seuil;
+	}
+	{
+		float f[8];
+		BrouillardUniformes( p->fog_noir, false, f, f + 4 );
+		if( memcmp( v->d_fog_pose, f, sizeof( f )) != 0 )
+		{
+			R.Uniform4f( v->d_fogp, f[0], f[1], f[2], f[3] );
+			R.Uniform4f( v->d_fogc, f[4], f[5], f[6], f[7] );
+			memcpy( v->d_fog_pose, f, sizeof( f ));
+		}
+	}
+	for( int k = 0; k < p->passes; ++k )
+	{
+		if( v->d_w[k] >= 0 )
+			R.Uniform4f( v->d_w[k], p->wib_uv[k][0], p->wib_uv[k][1], 0.0f, 0.0f );
+		if( v->d_e[k] >= 0 )
+			R.Uniform4f( v->d_e[k], p->env_tile[k][0], p->env_tile[k][1], 0.0f, 0.0f );
+	}
+	// Textures et samplers par unite.
+	for( int k = 0; k < p->passes; ++k )
+	{
+		if(( s_dtex[k] != reel[k] ) || ( s_dsamp[k] != samp[k] ))
+		{
+			if( s_dactive != k )
+			{
+				R.ActiveTexture( GL_TEXTURE0 + k );
+				s_dactive = k;
+			}
+			if( s_dtex[k] != reel[k] )
+			{
+				R.BindTexture( GL_TEXTURE_2D, reel[k] );
+				s_dtex[k] = reel[k];
+			}
+			if( s_dsamp[k] != samp[k] )
+			{
+				R.BindSampler( k, samp[k] );
+				s_dsamp[k] = samp[k];
+			}
+		}
+		if( k + 1 > s_dunits )
+			s_dunits = k + 1;
+	}
+	for( int i = 0; i < n; ++i )
+		R.DrawElements( mode, count[i], GL_UNSIGNED_SHORT,
+		                (const void *)( first[i] * sizeof( unsigned short )));
+	++s_d_lots;
+	return true;
+}
+#else
+bool ShaderMateriauDirectActif( void ) { return false; }
+void ShaderMateriauDirectFin( void ) {}
+void ShaderMateriauDirectLiberer( unsigned int vao ) {}
+bool ShaderMateriauDirectLot( const SShaderMateriau *p, const unsigned int *tex,
+                              const unsigned char *au, const unsigned char *av, unsigned int ibo,
+                              unsigned int *p_vao, const int *first, const int *count, int n,
+                              unsigned int mode )
+{
+	return false;
+}
+#endif
+
 void ShaderMateriauDebut( const float *mvp )
 {
+	Gl4esNeutreDebut();
+#ifdef PORTMASTER
+	glBindVertexArray( 0 );
+	s_materiau_vao_cour = 0;
+#endif
 	sp_mvp = mvp;
 	sp_var_cour = NULL;
 	s_uv_actifs = -1;
@@ -663,8 +1266,9 @@ void ShaderMateriauDebut( const float *mvp )
 	glEnableVertexAttribArray( ATTR_COULEUR );
 }
 
-bool ShaderMateriauMaillage( const SShaderMateriau *p )
+bool ShaderMateriauMaillage( const SShaderMateriau *p, unsigned int *p_vao )
 {
+	ShaderMateriauDirectFin();		// chemin gl4es : etat reel rendu d'abord
 	const SVarianteMateriau *v = variante( p );
 	if( !v )
 		return false;		// l'appelant ne doit PAS dessiner (pipeline fixe incoherent)
@@ -700,10 +1304,103 @@ bool ShaderMateriauMaillage( const SShaderMateriau *p )
 	for( int k = 0; k < p->passes; ++k )
 		if( v->w[k] >= 0 )
 			glUniform4f( v->w[k], p->wib_uv[k][0], p->wib_uv[k][1], 0.0f, 0.0f );
+#ifdef PORTMASTER
+	// Reflet : vue (3 lignes) et tuilage, comme poser_uniformes_env_e (GXM).
+	if( v->env )
+	{
+		if( !sp_vue_glsl || !p->nbo )
+			return false;
+		for( int r = 0; r < 3; ++r )
+			glUniform4f( v->v[r], sp_vue_glsl[r], sp_vue_glsl[4 + r], sp_vue_glsl[8 + r], sp_vue_glsl[12 + r] );
+		for( int k = 0; k < p->passes; ++k )
+			if( v->e[k] >= 0 )
+				glUniform4f( v->e[k], p->env_tile[k][0], p->env_tile[k][1], 0.0f, 0.0f );
+	}
+	// Attributs : passes a UV (pas celles en reflet) et normales si reflet.
+	const unsigned int env_m = v->env;
+	const int cle_attr = p->passes | ( (int)env_m << 4 );
+#endif
 
 	static const int attr_uv[4] = { ATTR_UV, ATTR_UV2, ATTR_UV3, ATTR_UV4 };
+#ifdef PORTMASTER
+	if( p_vao && materiau_vao_actif())
+	{
+		const bool configure = *p_vao == 0;
+		if( configure ) glGenVertexArrays( 1, p_vao );
+		if( *p_vao )
+		{
+			glBindVertexArray( *p_vao );
+			s_materiau_vao_cour = *p_vao;
+			if( configure )
+			{
+				glEnableVertexAttribArray( ATTR_POSITION );
+				glEnableVertexAttribArray( ATTR_COULEUR );
+				for( int k = 0; k < 4; ++k )
+				{
+					if(( k < p->passes ) && !( env_m & ( 1u << k ))) glEnableVertexAttribArray( attr_uv[k] );
+					else glDisableVertexAttribArray( attr_uv[k] );
+				}
+				if( env_m ) glEnableVertexAttribArray( ATTR_NORMALE_M );
+				else glDisableVertexAttribArray( ATTR_NORMALE_M );
+				glBindBuffer( GL_ARRAY_BUFFER, p->vbo );
+				glVertexAttribPointer( ATTR_POSITION, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+				for( int k = 0; k < p->passes; ++k )
+				{
+					if( env_m & ( 1u << k ))
+						continue;
+					glBindBuffer( GL_ARRAY_BUFFER, p->uvbo[k] );
+					glVertexAttribPointer( attr_uv[k], 2, GL_FLOAT, GL_FALSE, 0, NULL );
+				}
+				if( env_m )
+				{
+					glBindBuffer( GL_ARRAY_BUFFER, p->nbo );
+					glVertexAttribPointer( ATTR_NORMALE_M, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+				}
+				glBindBuffer( GL_ARRAY_BUFFER, p->cbo );
+				glVertexAttribPointer( ATTR_COULEUR, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, NULL );
+				glBindBuffer( GL_ARRAY_BUFFER, 0 );
+			}
+			return true;
+		}
+	}
+	if( s_materiau_vao_cour )
+	{
+		glBindVertexArray( 0 );
+		s_materiau_vao_cour = 0;
+		s_uv_actifs = -1;
+		glEnableVertexAttribArray( ATTR_POSITION );
+		glEnableVertexAttribArray( ATTR_COULEUR );
+	}
+#endif
 	glBindBuffer( GL_ARRAY_BUFFER, p->vbo );
 	glVertexAttribPointer( ATTR_POSITION, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+#ifdef PORTMASTER
+	if( cle_attr != s_uv_actifs )
+	{
+		for( int k = 0; k < 4; ++k )
+		{
+			if(( k < p->passes ) && !( env_m & ( 1u << k )))
+				glEnableVertexAttribArray( attr_uv[k] );
+			else
+				glDisableVertexAttribArray( attr_uv[k] );
+		}
+		if( env_m ) glEnableVertexAttribArray( ATTR_NORMALE_M );
+		else glDisableVertexAttribArray( ATTR_NORMALE_M );
+		s_uv_actifs = cle_attr;
+	}
+	for( int k = 0; k < p->passes; ++k )
+	{
+		if( env_m & ( 1u << k ))
+			continue;
+		glBindBuffer( GL_ARRAY_BUFFER, p->uvbo[k] );
+		glVertexAttribPointer( attr_uv[k], 2, GL_FLOAT, GL_FALSE, 0, NULL );
+	}
+	if( env_m )
+	{
+		glBindBuffer( GL_ARRAY_BUFFER, p->nbo );
+		glVertexAttribPointer( ATTR_NORMALE_M, 3, GL_FLOAT, GL_FALSE, 0, NULL );
+	}
+#else
 	if( p->passes != s_uv_actifs )
 	{
 		for( int k = 0; k < 4; ++k )
@@ -720,6 +1417,7 @@ bool ShaderMateriauMaillage( const SShaderMateriau *p )
 		glBindBuffer( GL_ARRAY_BUFFER, p->uvbo[k] );
 		glVertexAttribPointer( attr_uv[k], 2, GL_FLOAT, GL_FALSE, 0, NULL );
 	}
+#endif
 	glBindBuffer( GL_ARRAY_BUFFER, p->cbo );
 	glVertexAttribPointer( ATTR_COULEUR, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, NULL );
 	glBindBuffer( GL_ARRAY_BUFFER, 0 );
@@ -728,13 +1426,22 @@ bool ShaderMateriauMaillage( const SShaderMateriau *p )
 
 void ShaderMateriauFin()
 {
+	ShaderMateriauDirectFin();
+#ifdef PORTMASTER
+	glBindVertexArray( 0 );
+	s_materiau_vao_cour = 0;
+#endif
 	static const int attr_uv[4] = { ATTR_UV, ATTR_UV2, ATTR_UV3, ATTR_UV4 };
 	glDisableVertexAttribArray( ATTR_POSITION );
 	glDisableVertexAttribArray( ATTR_COULEUR );
 	for( int k = 0; k < 4; ++k )
 		glDisableVertexAttribArray( attr_uv[k] );
+#ifdef PORTMASTER
+	glDisableVertexAttribArray( ATTR_NORMALE_M );
+#endif
 	glUseProgram( 0 );
 	sp_var_cour = NULL;
+	Gl4esNeutreFin();
 }
 
 
@@ -3037,7 +3744,7 @@ void *GxmMateriauPreparer( const SShaderMateriau *p, SceGxmTexture *const *p_tex
                            int first, int count, unsigned int ibo, int famille ) { return NULL; }
 void  GxmMateriauLotPre( void *p_pre ) {}
 void  GxmMateriauLibererPre( void *p_pre ) {}
-void GxmMateriauVue( const float *view ) {}
+void GxmMateriauVue( const float *view ) { sp_vue_glsl = view; }
 bool GxmMateriauMaillage( const SShaderMateriau *p, SceGxmTexture *const *p_tex,
                           unsigned int ibo, int num_indices, int famille ) { return false; }
 void GxmMateriauFin() {}

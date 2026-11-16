@@ -39,6 +39,10 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <vitaGL.h>
+#ifdef PORTMASTER
+#include <SDL.h>
+#include <gfx/Vita/p_gamma.h>
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -69,17 +73,33 @@ namespace
 #define ANNEAU			( 2 * 48000 )
 
 static short			s_anneau[ANNEAU * 2];
-static volatile int		s_ecrit;					/* en echantillons, croissant */
-static volatile int		s_lu;						/* idem, cote sortie */
-static volatile int		s_joues;					/* echantillons source consommes */
-static volatile int		s_fin_audio;
+#ifdef PORTMASTER
+class MovieCounter
+{
+public:
+	operator int() const { return __atomic_load_n( &m_value, __ATOMIC_ACQUIRE ); }
+	void operator=( int value ) { __atomic_store_n( &m_value, value, __ATOMIC_RELEASE ); }
+	void operator+=( int increment ) { __atomic_fetch_add( &m_value, increment, __ATOMIC_RELEASE ); }
+
+private:
+	int m_value;
+};
+typedef MovieCounter MovieSharedInt;
+#else
+typedef volatile int MovieSharedInt;
+#endif
+
+static MovieSharedInt	s_ecrit;					/* en echantillons, croissant */
+static MovieSharedInt	s_lu;						/* idem, cote sortie */
+static MovieSharedInt	s_joues;					/* echantillons source consommes */
+static MovieSharedInt	s_fin_audio;
 static unsigned int		s_pas;						/* 16.16, source par sortie */
 static int				s_port	 = -1;
 static SceUID			s_thread = -1;
 /* Double tampon : sceAudioOutOutput lit le tampon PENDANT qu'il joue (#30). */
 static short			*s_sortie_base = NULL;
 
-static volatile int		s_consommateur;				/* thread de sortie en marche */
+static MovieSharedInt	s_consommateur;				/* thread de sortie en marche */
 
 static void audio_cb( void *, const short *pcm, int n )
 {
@@ -145,7 +165,11 @@ static int thread_audio( SceSize, void * )
 			memset( out + 2 * i, 0, ( GRAIN - i ) * 2 * sizeof( short ));
 		sceAudioOutOutput( s_port, out );		/* bloque ~10,7 ms */
 	}
+#ifdef PORTMASTER
+	return 0;
+#else
 	return sceKernelExitDeleteThread( 0 );
+#endif
 }
 
 /* -- Video : texture YUV420P3, conversion couleur par le GPU ---------------
@@ -156,7 +180,11 @@ static int thread_audio( SceSize, void * )
 
 static unsigned char	*s_tasse;					/* w*h*3/2 */
 
-static void televerse( GLuint tex, const VitaBinkFrame &f, int w, int h )
+#ifdef PORTMASTER
+static unsigned char *s_rgba;
+#endif
+
+static bool televerse( GLuint tex, const VitaBinkFrame &f, int w, int h )
 {
 	const unsigned char *src = f.plane[0];
 	if( !( f.pitch[0] == w && f.pitch[1] == w / 2 && f.pitch[2] == w / 2 &&
@@ -172,16 +200,31 @@ static void televerse( GLuint tex, const VitaBinkFrame &f, int w, int h )
 		src = s_tasse;
 	}
 	glBindTexture( GL_TEXTURE_2D, tex );
+#ifdef PORTMASTER
+	if( SDL_ConvertPixels( w, h, SDL_PIXELFORMAT_IYUV, src, w,
+	                       SDL_PIXELFORMAT_RGBA32, s_rgba, 4 * w ) < 0 )
+	{
+		VLOG( "FMV", "YUV conversion failed: %s", SDL_GetError() );
+		return false;
+	}
+	glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s_rgba );
+#else
 	// glCompressedTexImage2D et NON glTexImage2D : vitaGL ne connait les
 	// formats planaires que la (textures.c, gpu_alloc_planar_texture). Par
 	// glTexImage2D, les plans etaient lus comme du RGBA : image repetee 4 fois.
 	glCompressedTexImage2D( GL_TEXTURE_2D, 0, VGL_YUV420P_BT601, w, h, 0,
 	                        w * h * 3 / 2, src );
+#endif
+	return true;
 }
 
 /* 4:3 dans 960x544 : 725x544 centre, bandes noires. */
 static void dessine( GLuint tex )
 {
+#ifdef PORTMASTER
+	NxVita::GammaImageDebut();
+	NxVita::DrawFullscreenTexture( tex, true );
+#else
 	const float L = 960.0f, H = 544.0f, w = H * 4.0f / 3.0f, x0 = ( L - w ) * 0.5f;
 	const float pos[] = { x0, 0,  x0 + w, 0,  x0, H,  x0 + w, H };
 	static const float uv[] = { 0, 0,  1, 0,  0, 1,  1, 1 };
@@ -218,6 +261,7 @@ static void dessine( GLuint tex )
 	glMatrixMode( GL_MODELVIEW );  glPopMatrix();
 	glMatrixMode( GL_PROJECTION ); glPopMatrix();
 	glMatrixMode( GL_MODELVIEW );
+#endif
 
 	NxVita::GammaImageFin();
 	vita_dbgsrv_frame();		/* captures vctl pendant le film */
@@ -242,7 +286,13 @@ static unsigned long long maintenant_us( void ) { return sceKernelGetProcessTime
 
 static double horloge_us( bool avec_son, int hz, unsigned long long t0 )
 {
+#ifdef PORTMASTER
+	// The SDL mixer queues audio. Counting samples submitted would run video
+	// ahead of playback, and an empty queue would stall the clock.
+	return (double)( maintenant_us() - t0 );
+#else
 	return avec_son ? 1e6 * s_joues / hz : (double)( maintenant_us() - t0 );
+#endif
 }
 
 } // namespace
@@ -278,6 +328,27 @@ void PMovies_PlayMovie( const char *pName )
 	      info.sample_rate, info.channels, vol );
 
 	s_tasse = (unsigned char *)malloc( info.width * info.height * 3 / 2 );
+	if( !s_tasse )
+	{
+		vita_bink_close( b );
+		return;
+	}
+#ifdef PORTMASTER
+	s_rgba = (unsigned char *)malloc( info.width * info.height * 4 );
+	if( !s_rgba )
+	{
+		free( s_tasse );
+		s_tasse = NULL;
+		vita_bink_close( b );
+		return;
+	}
+	GLint previous_active_texture = 0, previous_texture = 0;
+	glGetIntegerv( GL_ACTIVE_TEXTURE, &previous_active_texture );
+	glActiveTexture( GL_TEXTURE0 );
+	glGetIntegerv( GL_TEXTURE_BINDING_2D, &previous_texture );
+	const SDL_YUV_CONVERSION_MODE previous_yuv_mode = SDL_GetYUVConversionMode();
+	SDL_SetYUVConversionMode( SDL_YUV_CONVERSION_BT601 );
+#endif
 	GLuint tex = 0;
 	glGenTextures( 1, &tex );
 	glBindTexture( GL_TEXTURE_2D, tex );
@@ -286,7 +357,13 @@ void PMovies_PlayMovie( const char *pName )
 	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
 	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
 
-	s_ecrit = s_lu = s_joues = 0;
+#ifdef PORTMASTER
+	glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, info.width, info.height, 0,
+	              GL_RGBA, GL_UNSIGNED_BYTE, NULL );
+#endif
+	s_ecrit = 0;
+	s_lu = 0;
+	s_joues = 0;
 	s_fin_audio = 0;
 	s_consommateur = 0;
 	bool avec_son = false;
@@ -295,8 +372,13 @@ void PMovies_PlayMovie( const char *pName )
 		if( !s_sortie_base )
 			s_sortie_base = (short *)memalign( 64, 2 * GRAIN * 2 * sizeof( short ));
 		s_pas  = (unsigned int)((( unsigned long long )info.sample_rate << 16 ) / SORTIE_HZ );
+#ifdef PORTMASTER
+		const int port_type = SCE_AUDIO_OUT_PORT_TYPE_MOVIE;
+#else
+		const int port_type = SCE_AUDIO_OUT_PORT_TYPE_MAIN;
+#endif
 		s_port = s_sortie_base
-		         ? sceAudioOutOpenPort( SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN,
+		         ? sceAudioOutOpenPort( port_type, GRAIN,
 		                                SORTIE_HZ, SCE_AUDIO_OUT_MODE_STEREO )
 		         : -1;
 		if( s_port >= 0 )
@@ -323,6 +405,10 @@ void PMovies_PlayMovie( const char *pName )
 	uint16 debounce_flags[4] = { 0, 0, 0, 0 };
 	const double periode_us = 1e6 * info.fps_den / info.fps_num;
 	const unsigned long long t0 = maintenant_us();
+#ifdef PORTMASTER
+	const double maximum_presentation_gap_us = 4.0 * periode_us;
+	double last_presentation_us = -maximum_presentation_gap_us;
+#endif
 	unsigned long long t_dec = 0, t_dec_max = 0;
 	int n_dec = 0, n_sautees = 0;
 
@@ -339,7 +425,13 @@ void PMovies_PlayMovie( const char *pName )
 		double h = horloge_us( avec_son, info.sample_rate, t0 );
 		const double echeance_us = f.index * periode_us;
 
-		if( h > echeance_us + periode_us )
+		bool en_retard = h > echeance_us + periode_us;
+#ifdef PORTMASTER
+		// A slow first swap can leave the decoder behind for the whole clip.
+		// Present periodically even while catching up.
+		en_retard = en_retard && h - last_presentation_us < maximum_presentation_gap_us;
+#endif
+		if( en_retard )
 		{
 			++n_sautees;						// en retard : on ne presente pas
 		}
@@ -350,8 +442,12 @@ void PMovies_PlayMovie( const char *pName )
 				sceKernelDelayThread( 2000 );
 				h = horloge_us( avec_son, info.sample_rate, t0 );
 			}
-			televerse( tex, f, info.width, info.height );
+			if( !televerse( tex, f, info.width, info.height ))
+				break;
 			dessine( tex );
+#ifdef PORTMASTER
+			last_presentation_us = horloge_us( avec_son, info.sample_rate, t0 );
+#endif
 		}
 
 		// Sortie au START / CROIX.
@@ -382,10 +478,33 @@ void PMovies_PlayMovie( const char *pName )
 
 	s_fin_audio = 1;
 	s_consommateur = 0;
-	if( s_thread >= 0 ) { sceKernelWaitThreadEnd( s_thread, NULL, NULL ); s_thread = -1; }
-	if( s_port >= 0 )   { sceAudioOutReleasePort( s_port ); s_port = -1; }
+	if( s_thread >= 0 )
+	{
+		if( avec_son )
+			sceKernelWaitThreadEnd( s_thread, NULL, NULL );
+#ifdef PORTMASTER
+		sceKernelDeleteThread( s_thread );
+#endif
+		s_thread = -1;
+	}
+	if( s_port >= 0 )
+	{
+#ifdef PORTMASTER
+		sceAudioOutClosePort( s_port );
+#else
+		sceAudioOutReleasePort( s_port );
+#endif
+		s_port = -1;
+	}
 	vita_bink_close( b );
 	glDeleteTextures( 1, &tex );
+#ifdef PORTMASTER
+	glBindTexture( GL_TEXTURE_2D, previous_texture );
+	glActiveTexture( previous_active_texture );
+	SDL_SetYUVConversionMode( previous_yuv_mode );
+	free( s_rgba );
+	s_rgba = NULL;
+#endif
 	free( s_tasse ); s_tasse = NULL;
 }
 

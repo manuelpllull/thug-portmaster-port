@@ -94,6 +94,9 @@ struct SPrsSommet
 };
 
 static SPrsSommet *	sp_sommets = NULL;
+#ifdef PORTMASTER
+static GLuint s_position_buffer = 0, s_uv_buffer = 0, s_color_buffer = 0;
+#endif
 static bool			s_tampon_ok = false;
 static int			s_n = 0;					// sommets en attente
 
@@ -120,6 +123,11 @@ static bool assurer_tampon( void )
 		return false;
 	}
 	memset( sp_sommets, 0, sizeof( SPrsSommet ) * PRS_SOMMETS );
+#ifdef PORTMASTER
+	glGenBuffers( 1, &s_position_buffer );
+	glGenBuffers( 1, &s_uv_buffer );
+	glGenBuffers( 1, &s_color_buffer );
+#endif
 	s_tampon_ok = true;
 	return true;
 }
@@ -128,6 +136,15 @@ static void vider( void )
 {
 	if( s_n )
 	{
+#ifdef PORTMASTER
+		const size_t bytes = sizeof( SPrsSommet ) * s_n;
+		glBindBuffer( GL_ARRAY_BUFFER, s_position_buffer );
+		glBufferData( GL_ARRAY_BUFFER, bytes, sp_sommets, GL_STREAM_DRAW );
+		glBindBuffer( GL_ARRAY_BUFFER, s_uv_buffer );
+		glBufferData( GL_ARRAY_BUFFER, bytes - 12, (const char *)sp_sommets + 12, GL_STREAM_DRAW );
+		glBindBuffer( GL_ARRAY_BUFFER, s_color_buffer );
+		glBufferData( GL_ARRAY_BUFFER, bytes - 20, (const char *)sp_sommets + 20, GL_STREAM_DRAW );
+#endif
 		glDrawArrays( GL_TRIANGLES, 0, s_n );
 		s_sommets += s_n;
 		++s_appels;
@@ -685,13 +702,24 @@ void RenderParticulesAnciennes( void )
 		glClientActiveTexture( GL_TEXTURE0 );
 		glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
 
+#ifndef PORTMASTER
 		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+#endif
 		glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, 0 );
 		glEnableClientState( GL_VERTEX_ARRAY );
 		glEnableClientState( GL_COLOR_ARRAY );
+#ifdef PORTMASTER
+		glBindBuffer( GL_ARRAY_BUFFER, Nx::s_position_buffer );
+		glVertexPointer( 3, GL_FLOAT, sizeof( Nx::SPrsSommet ), (const void *)0 );
+		glBindBuffer( GL_ARRAY_BUFFER, Nx::s_uv_buffer );
+		glTexCoordPointer( 2, GL_FLOAT, sizeof( Nx::SPrsSommet ), (const void *)0 );
+		glBindBuffer( GL_ARRAY_BUFFER, Nx::s_color_buffer );
+		glColorPointer( 4, GL_UNSIGNED_BYTE, sizeof( Nx::SPrsSommet ), (const void *)0 );
+#else
 		glVertexPointer( 3, GL_FLOAT, sizeof( Nx::SPrsSommet ), &Nx::sp_sommets[0].x );
 		glTexCoordPointer( 2, GL_FLOAT, sizeof( Nx::SPrsSommet ), &Nx::sp_sommets[0].u );
 		glColorPointer( 4, GL_UNSIGNED_BYTE, sizeof( Nx::SPrsSommet ), Nx::sp_sommets[0].rgba );
+#endif
 		BrouillardFixe( 1 );
 		Nx::s_n = 0;
 		Nx::s_image_ok = true;
@@ -708,6 +736,9 @@ void RenderParticulesAnciennes( void )
 		glDisableClientState( GL_COLOR_ARRAY );
 		glDisableClientState( GL_TEXTURE_COORD_ARRAY );
 		glDisableClientState( GL_VERTEX_ARRAY );
+#ifdef PORTMASTER
+		glBindBuffer( GL_ARRAY_BUFFER, 0 );
+#endif
 		glBindTexture( GL_TEXTURE_2D, 0 );
 		glDisable( GL_TEXTURE_2D );
 		glBlendEquation( GL_FUNC_ADD );

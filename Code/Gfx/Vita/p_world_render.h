@@ -28,6 +28,8 @@ void ClearWorld( void );
 void MondeScenePosee( const void *p_scene );
 void MondeSceneRetiree( const void *p_scene );
 bool MondeVide( void );
+// Nombre de maillages du decor charge (le menu principal en a 4, un niveau des milliers).
+int NombreMaillagesMonde( void );
 // Detruit les dictionnaires de niveau que le moteur a rendus (p_nx_managers.cpp).
 void LibererDictsEnAttente( void );
 // Textures et dictionnaires vivants (diagnostic, p_NxTexture.cpp).

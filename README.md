@@ -1,204 +1,122 @@
-# THUG Vita
+# THUG for PortMaster
 
-*Tony Hawk's Underground* (2003), running natively on the PS Vita.
+*Tony Hawk's Underground* (2003), running natively on Linux handhelds through
+[PortMaster](https://portmaster.games).
 
-[![Watch the trailer](https://img.youtube.com/vi/XKwEK5B5K2w/maxresdefault.jpg)](https://www.youtube.com/watch?v=XKwEK5B5K2w)
+This isn't an emulator: it's the game's own code, built for 32-bit ARM (armhf)
+and drawn with OpenGL ES through [gl4es](https://github.com/ptitSeb/gl4es).
+It grew out of my PS Vita port of THUG, and runs on the same engine backends.
 
-This isn't an emulator or a wrapper: the game runs natively on the Vita's ARM
-processor, with a graphics backend written for it on top of vitaGL.
-
-**[Download the latest version from the Releases page](../../releases/latest).**
-You need your own copy of the game: this repository and the release don't
+You need your own copy of the game. This repository and its releases don't
 include any game data.
 
-The game is fully playable: Story mode, free skate, Create-a-Skater and
-every level. Most of them run at or near 60 fps.
+## Devices
 
-## How it was made
+| Device | Screen | CFW | Status |
+|---|---|---|---|
+| R36S (RK3326) | 640x480 | – | Runs. Frame-time hitches remain in busy areas |
+| RG34XX (H700) | 720x480 | Knulli | Runs. Busy scenes drop frames; `THUG_RENDER_SCALE=0.75` helps |
 
-This port was built with agentic AI and a custom harness, over several months.
-The harness drives a real PS Vita from the computer: it builds the game, sends
-it to the console, plays it, takes screenshots and reads the logs, then fixes
-what it finds and starts again. I spent a lot of that time polishing it as much
-as I could, comparing it against the original Xbox version.
-
-If something looks wrong or crashes, please
-[open an issue](../../issues). Issues are welcome, and the more detail the
-better: which level, what you were doing, a photo if you can.
-
----
+Other PortMaster devices with an armhf userland and 1 GB of RAM should work but
+haven't been tested. Reports are welcome in the [issues](../../issues).
 
 ## What you need
 
-- A PS Vita running custom firmware (HENkaku / Enso). If yours isn't set up
-  yet, [vita.hacks.guide](https://vita.hacks.guide) walks you through it.
-  PS TV and external controllers (DS3, DS4, DualSense with a plugin) work with
-  the DualShock layout, see *Vita Options*.
-- [VitaShell](https://github.com/TheOfficialFloW/VitaShell) to install the game
-  and copy files.
-- `libshacccg.suprx` in `ur0:data/`. The game compiles its shaders on the
-  console and can't start without it. If you've never set it up, install
-  [ShaRKF00D](https://github.com/Rinnegatamante/ShaRKF00D), run it once, and
-  it puts the file in the right place.
-- The **Xbox** version of *Tony Hawk's Underground*, **USA** release, as a disc
-  image (ISO) dumped from a disc you own. Other versions (PS2, GameCube, PAL)
-  won't work: the game reads the Xbox data files directly.
-- About **3.2 GB** free on your memory card (1.6 GB without the videos).
+- A handheld with [PortMaster](https://portmaster.games) installed.
+- The **Xbox** version of *Tony Hawk's Underground* as a disc image (`.iso`)
+  dumped from a disc you own. Only the **USA** release is supported. Other
+  versions (PAL, PS2, GameCube) won't work: the game reads the USA Xbox data
+  files.
+- About **3.5 GB** free for the extracted game, plus room for the `.iso`
+  during the first launch.
 
 ## Installing
 
-1. **Extract the game data.** Open the ISO with
-   [extract-xiso](https://github.com/XboxDev/extract-xiso):
+1. Copy `thug.zip` to PortMaster's `autoinstall` folder and open PortMaster.
+   It installs `THUG.sh` and the `thug` folder into `ports`.
+2. Copy your disc image (`.iso`) into `ports/thug/gamedata`.
+3. Start **Tony Hawk's Underground** from Ports. The first launch extracts the
+   disc image (several minutes; it needs `python3` on the device). Afterwards
+   you can delete the `.iso`.
 
-   ```
-   extract-xiso -x "Tony Hawk's Underground (USA).iso"
-   ```
+No `python3` on your firmware? Extract the disc on a computer with
+[extract-xiso](https://github.com/XboxDev/extract-xiso)
+(`extract-xiso -x "Tony Hawk's Underground (USA).iso"`) and copy the `data`
+folder it produces into `ports/thug/gamedata`, so that
+`ports/thug/gamedata/data/pre/qb.prx` exists.
 
-   You get a folder with a `data` folder inside. That's the part you need.
-   Keep everything in it, including `movies` (the intro, pro and sponsor
-   videos) and `streams` (music and voices). If space is tight, you can delete
-   `movies`: the videos are then skipped and the game carries on normally.
-
-2. **Copy it to the Vita.** Using VitaShell, copy that `data` folder so you
-   end up with the line below. USB is much faster than FTP for this (FTP can
-   take an hour or more).
-
-   ```
-   ux0:data/thug/Data/
-   ```
-
-   Upper or lower case doesn't matter on the memory card. Just make sure you
-   don't end up with one folder inside another (`Data/data/`).
-
-3. **Install the game.** Download `thug_vita.vpk` from the
-   [Releases page](../../releases/latest), copy it anywhere on the Vita, open
-   it in VitaShell and install it.
-
-4. **Play.** Tap the bubble on the home screen, then *Start*.
-
-The first launch of a level takes a while (around ten seconds for the bigger
-ones). That's normal.
+The first load of each level takes longer while shaders are compiled; they're
+cached for the next time.
 
 ## Controls
 
-| PS Vita | Xbox pad | What it does |
-|---|---|---|
-| Left stick / D-pad | | Steer, walk, balance |
-| ✕ | ✕ | Ollie, jump |
-| □ | □ | Flip tricks |
-| ○ | ○ | Grab tricks |
-| △ | △ | Grind, lip tricks |
-| **L** | Left trigger (L1 + L2) | Spin left in the air. On the ground: nollie (tap again for pressure). Revert when landing on a ramp. On foot: reset the camera |
-| **R** | Right trigger (R1 + R2) | Spin right in the air. On the ground: switch stance. Revert when landing on a ramp. On foot: hold to grab ledges and ladders (push the left stick up to climb) |
-| **L + R** in the air | | Spine transfer, acid drop, vert recovery |
-| **SELECT** | White | Get off the board, or back on (caveman) |
-| **SELECT + R** | Black | Create-a-Park: zoom out (SELECT alone zooms in) |
-| START | START | Pause menu |
+| Button | What it does |
+|---|---|
+| Left stick / D-pad | Skate, menus |
+| B | Ollie, accept |
+| Y | Flip trick |
+| A | Grab trick, back |
+| X | Grind, lip trick |
+| L1 / R1 | Spin left / right |
+| L2 / R2 | Nollie / switch stance, reverts |
+| Select | Get off the board |
+| Start | Pause |
+| R3 + Select | FPS meter on/off |
+| Select + Start | Quit |
 
-It's the Xbox layout: the Xbox pad also has only two triggers, and each one
-does both jobs. The touchscreen and the rear touchpad are not used.
+Face buttons follow their printed labels on every device, since PortMaster maps
+pads by label.
 
-### Vita Options
+## Settings
 
-The port adds its own settings menu: **Options > Control Setup > Vita Options**
-(from the main menu or the pause menu). Changes apply right away and are kept
-in `ux0:data/thug/controls.txt`, which you can also edit by hand:
+Optional settings go in `ports/thug/thug.cfg`, one `VAR=value` per line:
 
 | Setting | What it does |
 |---|---|
-| Controller / `dualshock_layout=1` | **DualShock** layout, for a PS TV, an external DS3/DS4/DualSense pad, or trigger grips on the rear touchpad: L1, L2, R1 and R2 are separate buttons like on PS2 (L1/R1 spin, L2 nollie, R2 switch/revert, L1+R1 gets off the board, L2 or R2 in the air for spine transfers). The rear touchpad halves act as L2/R2. Default: PS Vita |
-| Camera Up/Down, Camera Left/Right / `invert_right_y`, `invert_right_x` | Invert the right stick (camera) |
-| Skater Up/Down / `invert_left_y` | Invert the left stick up/down (also `invert_left_x` in the file) |
-| Frame Rate / `framerate=30` | Lock the game to 30 fps (steadier in the heaviest levels). Default 60 |
+| `THUG_BTN_OLLIE`, `THUG_BTN_GRAB`, `THUG_BTN_FLIP`, `THUG_BTN_GRIND` | Move an action to another face button: `a`, `b`, `x` or `y`. For example `THUG_BTN_OLLIE=a` and `THUG_BTN_GRAB=b` swap those two |
+| `THUG_FPS_METER=1` | Show the FPS meter from the start (for pads without R3) |
+| `THUG_RENDER_SCALE=0.75` | Render fewer lines: faster on GPU-bound devices, softer picture |
+| `THUG_RENDER_THREAD=0` | Single-threaded rendering, if graphics break |
 
-Delete the file to get the defaults back.
+The full list, including the diagnostic switches, is in
+[`portmaster/README.md`](portmaster/README.md).
 
-## Saves
+## Files on the device
 
-Saves go to `ux0:data/thug/save/`. They're separate from the game itself:
-deleting or reinstalling the game doesn't touch them.
-
-## RetroFlow cover
-
-If you use [RetroFlow Launcher](https://github.com/jimbob4000/RetroFlow-Launcher),
-there's a cover in [`covers/THUG00001.png`](covers/THUG00001.png), made by
-[u/BlazeRed16](https://www.reddit.com/user/BlazeRed16). Copy it to:
-
-```
-ux0:data/RetroFlow/COVERS/Sony - PlayStation Vita/THUG00001.png
-```
-
-In RetroFlow, open the game's settings with △, set its category to *PS Vita*,
-then rescan your games.
+- `ports/thug/log.txt`: the log of the last run. Attach it to bug reports.
+- `ports/thug/patchlog.txt`: the log of the first-launch extraction.
+- `ports/thug/save/`: your saves.
 
 ## Good to know
 
-- **Videos.** The intro, pro and sponsor videos play from the `movies` folder.
-  Press START or ✕ to skip one.
-- **HD HUD.** The score panel, special bar, balance meter, stance icons, trick
-  text and menu theme icons use the HD redraws made by the THUG Pro team. Same
-  layout as the original, just sharper. The other fonts are the original ones.
-- **No online or LAN play.** The game's online service shut down years ago,
-  and LAN isn't supported on the Vita.
-- A few small visual details can still differ from the Xbox version. If you
-  spot one, an issue with a photo helps a lot.
-
-## Troubleshooting
-
-**The game closes right away, or never gets past a black screen.**
-Check that `ur0:data/libshacccg.suprx` exists (see *What you need*).
-
-**It starts, then can't find the game files.**
-The folder has to be exactly `ux0:data/thug/Data/`, with the files from the
-Xbox USA disc inside.
-
-**Reporting a crash.** The game keeps a short log at `ux0:data/thug/thug.log`.
-Attaching it to your issue helps a lot.
+- **Videos** play from `data/movies`. Delete that folder to save space; the
+  videos are then skipped.
+- **No online or LAN play.** The game's online service shut down years ago.
+- The picture fills any screen shape without stretching. The HUD and menus
+  stay 4:3 in the middle.
 
 ## Building from source
 
-You need the [vitasdk](https://vitasdk.org) with its vitaGL, vitaShaRK and
-math-neon packages (`vdpm vitaGL vitashark mathneon`), CMake and a Unix shell (built on
-macOS; the include paths are case-insensitive, so a case-sensitive Linux
-filesystem needs extra work).
+See [`portmaster/README.md`](portmaster/README.md): an ARM hard-float cross
+compiler on Debian 10 (glibc 2.28), SDL 2, a pinned and patched gl4es, and a
+minimal FFmpeg build for the Bink videos. `portmaster/package.py` stages the
+release folder.
 
-```
-cmake -S vita -B vita/build \
-      -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
-      -DTHUG_RELEASE=ON
-make -C vita/build
-```
+### Repository layout
 
-The videos need a small FFmpeg build with only the Bink decoders. Build it
-once, before CMake (it installs to `~/vita-build/ffmpeg-bink`, where CMake
-looks for it; without it the game builds fine and skips the videos):
+| Path | Contents |
+|---|---|
+| `Code/` | The engine. Platform backends live in `Code/*/Vita/`: written for the Vita port, they run on Linux here through a small vitaGL/libc shim |
+| `portmaster/` | The Linux platform layer (SDL 2, input, threads, presenter), CMake build, launcher, installer and packaging |
+| `vita/engine.cmake` | Which engine sources are built |
+| `vita/qb/`, `vita/gen/` | The port's options script and its compiled form |
+| `vita/tools/` | Data tools: QB script assembler, scene and texture readers, HD pack builder |
 
-```
-curl -LO https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz && tar xf ffmpeg-7.1.1.tar.xz
-sh Code/Gel/Movies/Vita/build_ffmpeg_bink.sh "$PWD/ffmpeg-7.1.1" /tmp/ffmpeg-bink-build ~/vita-build/ffmpeg-bink
-```
+## How it was made
 
-`THUG_RELEASE=ON` builds the public version. Without it you get the development
-build, with a debug server on the network and test shortcuts.
-
-The LiveArea images and the boot screen are made from the game data, so
-they're not in the repository. Generate them before building:
-
-```
-pip install pillow numpy opencv-python playwright && playwright install chromium
-THUG_DATA=/path/to/data python3 vita/livearea/generer.py
-```
-
-It needs an internet connection the first time, to fetch a font.
-
-The HD HUD is made from the THUG Pro files, also outside the repository. With
-a THUG Pro install, generate it once; CMake then packs it into the VPK (it
-looks in `~/vita-build/thug-hd`, or set `-DTHUG_HD_DIR=...`; without it the
-VPK uses the original graphics):
-
-```
-python3 vita/tools/thugpro_hd.py /path/to/data /path/to/THUGPro ~/vita-build/thug-hd
-```
+Like the Vita port, this one was built with agentic AI (Anthropic's Claude),
+with me testing each build on the devices, reading the logs and comparing
+against the Xbox version.
 
 ## Credits
 
@@ -206,11 +124,9 @@ python3 vita/tools/thugpro_hd.py /path/to/data /path/to/THUGPro ~/vita-build/thu
   or endorsed by them, and all trademarks belong to their owners.
 - [kisak-thug](https://github.com/SwagSoftware/kisak-thug), the PC project this
   port builds on.
-- The [THUG Pro](https://thugpro.com) team for the HD redraws of the HUD and
-  theme icons.
+- [gl4es](https://github.com/ptitSeb/gl4es) by ptitSeb.
 - [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) for the Bink video decoder.
-- [vitaGL](https://github.com/Rinnegatamante/vitaGL) by Rinnegatamante, and
-  the [vitasdk](https://vitasdk.org) team.
-- [u/BlazeRed16](https://www.reddit.com/user/BlazeRed16) for the RetroFlow cover.
+- [SDL](https://www.libsdl.org) and the [PortMaster](https://portmaster.games)
+  team.
 - [Anthropic](https://www.anthropic.com), whose Claude models did most of the
-  porting work through the harness.
+  porting work.

@@ -106,6 +106,7 @@ bool g_vita_cache_plages = true;
 
 struct SWorldMesh
 {
+	GLuint	vao_direct;	// VAO GLES reel du chemin direct (PortMaster), ~0 = jamais
 	GLuint	vbo;		// positions
 	GLuint	uvbo;		// coordonnees de texture, 0 si le maillage n'en a pas
 	GLuint	cbo;		// couleurs de sommets (eclairage cuit), 0 si absentes
@@ -527,7 +528,11 @@ bool g_vita_lots = true;
 // Finesse de la grille de fusion. 4x4 : x3,7 sur le nombre d'appels tout en
 // gardant un culling par zone (mesure : 1x1 donnerait x5,1 mais sans culling,
 // 8x8 seulement x2,7).
+#ifdef PORTMASTER
+#define GRILLE_LOTS 4
+#else
 #define GRILLE_LOTS 1
+#endif
 
 // Mode de COMBINAISON de la couche 1, traduit en mode d'environnement du
 // pipeline fixe.
@@ -644,6 +649,7 @@ int g_vita_ordre_modeles = 0;
 
 static SWorldMesh *sp_world      = NULL;
 static int         s_num_world   = 0;
+int NombreMaillagesMonde( void ) { return s_num_world; }
 static int         s_world_cap   = 0;
 
 // --- Culling compact (issue #18) -------------------------------------------
@@ -825,6 +831,16 @@ static void materiau_shader_prepare( const SWorldMesh *p, SShaderMateriau *p_m )
 static bool materiau_env_prepare( const SWorldMesh *p, SShaderMateriau *p_m );
 static float seuil_effectif( unsigned int cutoff, GLuint tex, unsigned int a_min_sommets,
                              bool ignore_alpha );
+// Translucide a UNE couche dessine seul : materiau prepare par
+// materiau_shader_prepare, puis la regle de la route GXM "gxt" (tampon de
+// couleurs, couleur de passe neutre, alpha fixe, alpha des sommets, seuil).
+// Partagee par le dessin (chemin GLES direct, PortMaster) et la precompilation.
+static void materiau_une_couche( const SWorldMesh *p, SShaderMateriau &m );
+#ifdef PORTMASTER
+static void echauffer_lots( void );
+#endif
+static float seuil_effectif( unsigned int cutoff, GLuint tex, unsigned int a_min_sommets,
+                             bool ignore_alpha );
 
 struct SPlageLot
 {
@@ -850,6 +866,8 @@ struct SPlageLot
 struct SLot
 {
 	GLuint      vbo, uvbo, cbo, ibo;
+	GLuint      vao;		// cached shader attribute setup (PortMaster)
+	GLuint      vao_direct;	// VAO GLES reel du chemin direct (~0 = jamais)
 	GLuint      nbo;		// normales, lots a passe en reflet seulement (#5)
 	int         num_indices;
 	GLuint      texture;
@@ -890,6 +908,10 @@ struct SLot
 	// couleurs d'origine (copiees a la premiere teinte d'une plage).
 	int            num_vertices;
 	unsigned char *p_teinte_orig;
+	unsigned short zone;		// cellule de grille (cle de lot, bits 52-62)
+	// Mesure de fusion (THUG_MESURE_FUSION) : cles de groupe, voir la mesure au chargement.
+	unsigned long long fus_k, fus_k2, fus_ku;
+	unsigned char fus_ok;
 };
 
 // « fusm 0/1 » : dessiner aussi les lots MULTI-PASSES (par le shader). Coupe
@@ -1024,6 +1046,13 @@ int SceneMondeCourante( void )
 	return s_scene_no;
 }
 
+// Lots multi-couches translucides refuses par le shader materiau (pas de
+// variante) : leurs maillages retombent au dessin un par un (THUG R36S).
+static unsigned char s_lot_refus[8192];
+// THUG_TRANSP_MULTI_LOTS=0 : lots multi-couches translucides dessines un
+// par un, comme avant.
+static int s_lots_transp_multi = -1;
+
 void ClearWorld( void )
 {
 	for( int i = 0; i < s_num_world; ++i )
@@ -1032,6 +1061,8 @@ void ClearWorld( void )
 		sp_world[i].p_vcw = NULL;
 		free( sp_world[i].p_bb );
 		sp_world[i].p_bb = NULL;
+		ShaderMateriauDirectLiberer( sp_world[i].vao_direct );
+		sp_world[i].vao_direct = 0;
 		glDeleteBuffers( 1, &sp_world[i].vbo );
 		if( sp_world[i].uvbo )
 			glDeleteBuffers( 1, &sp_world[i].uvbo );
@@ -1063,6 +1094,10 @@ void ClearWorld( void )
 	// memoire liberee a chaque image.
 	for( int i = 0; i < s_num_lots; ++i )
 	{
+#ifdef PORTMASTER
+		if( sp_lots[i].vao ) glDeleteVertexArrays( 1, &sp_lots[i].vao );
+		ShaderMateriauDirectLiberer( sp_lots[i].vao_direct );
+#endif
 		if( sp_lots[i].vbo )  glDeleteBuffers( 1, &sp_lots[i].vbo );
 		if( sp_lots[i].uvbo ) glDeleteBuffers( 1, &sp_lots[i].uvbo );
 		if( sp_lots[i].cbo )  glDeleteBuffers( 1, &sp_lots[i].cbo );
@@ -1077,6 +1112,7 @@ void ClearWorld( void )
 	free( sp_lots );
 	sp_lots    = NULL;
 	s_num_lots = 0;
+	memset( s_lot_refus, 0, sizeof( s_lot_refus ));
 	free( sp_ordre_lots );
 	sp_ordre_lots   = NULL;
 	s_nb_ordre_lots = 0;
@@ -1725,6 +1761,7 @@ static void construire_lots( SVitaSceneGeom *p_geom, int base )
 			sp_lots = p_new;
 			SLot *L = &sp_lots[s_num_lots];
 			memset( L, 0, sizeof( SLot ));
+			L->zone = (unsigned short)(( p_ent[i0].cle >> 52 ) & 0x7FF );
 
 			glGenBuffers( 1, &L->vbo );
 			glBindBuffer( GL_ARRAY_BUFFER, L->vbo );
@@ -1865,6 +1902,95 @@ static void construire_lots( SVitaSceneGeom *p_geom, int base )
 	             "%d lots de billboards, %d plages (bbl %d, #69)",
 	      s_num_lots, ne, tot_i / 3, tot_p, n_zb, s_zbl_applique ? 1 : 0,
 	      n_bb, n_bbp, s_bbl_applique ? 1 : 0 );
+#ifdef PORTMASTER
+	if( getenv( "THUG_MESURE_FUSION" ))	// diagnostic, off par defaut
+	{
+		// R36S, mesure seulement : combien de lots OPAQUES pourraient partager
+		// un appel si leurs textures etaient dans des tableaux de textures.
+		// Trois cles par lot (stockees dans le lot pour la mesure par image) :
+		//   fus_k2 = materiau + forme des textures, sans cellule
+		//   fus_k  = idem + cellule de grille
+		//   fus_ku = idem + les UNIFORMES (couleurs de passe, seuil alpha, modes) :
+		//            un groupe ne peut etre un seul appel que si ces valeurs sont
+		//            communes, sinon il faut les passer par sommet.
+		// Rien n'est change au dessin.
+		const int nmax = s_num_lots;
+		const size_t sz = sizeof( unsigned long long ) * ( nmax > 0 ? nmax : 1 );
+		unsigned long long *k = (unsigned long long *)malloc( sz );
+		unsigned long long *k2 = (unsigned long long *)malloc( sz );
+		unsigned long long *k3 = (unsigned long long *)malloc( sz );
+		int nk = 0, n1 = 0, nmulti = 0, ntr = 0;
+		for( int l = 0; k && k2 && k3 && ( l < s_num_lots ); ++l )
+		{
+			SLot *L = &sp_lots[l];
+			L->fus_ok = 0;
+			const bool transp = (( L->mat_flags0 & 0x40 ) != 0 )
+			    || ( g_vita_melange_opaques && melange_hors_drapeau( L->blend, L->mat_flags0 ));
+			if( transp ) { ++ntr; continue; }
+			if( L->bb || L->m.env )
+				continue;
+			unsigned long long h = 1469598103934665603ULL;
+#define FUS_MIX( v ) h = ( h ^ (unsigned long long)( v )) * 1099511628211ULL
+			FUS_MIX( ShaderMateriauCle( &L->m )); FUS_MIX( L->blend ); FUS_MIX( L->no_bfc );
+			FUS_MIX( L->zbias ); FUS_MIX( L->m.passes );
+			for( int q = 0; q < L->m.passes; ++q )
+			{
+				const GLuint t = q ? L->tex_p[q - 1] : L->texture;
+				GLint w = 0, hh = 0, f = 0, mn = 0;
+				glBindTexture( GL_TEXTURE_2D, t );
+				glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w );
+				glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &hh );
+				glGetTexLevelParameteriv( GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &f );
+				glGetTexParameteriv( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &mn );
+				FUS_MIX( w ); FUS_MIX( hh ); FUS_MIX( f ); FUS_MIX( mn );
+				FUS_MIX( q ? L->addr_pu[q - 1] : L->addr_u ); FUS_MIX( q ? L->addr_pv[q - 1] : L->addr_v );
+			}
+			L->fus_k2 = h;
+			FUS_MIX( L->zone );
+			L->fus_k = h;
+			// uniformes : ce qui change d'un lot a l'autre sans changer de variante
+			FUS_MIX( L->alpha_cutoff ); FUS_MIX( L->a_min_sommets ); FUS_MIX( L->m.fixe0 );
+			for( int q = 0; q < L->m.passes; ++q )
+			{
+				for( int c = 0; c < 4; ++c )
+				{
+					unsigned int bits;
+					memcpy( &bits, &L->m.c[q][c], sizeof( bits ));
+					FUS_MIX( bits );
+				}
+				FUS_MIX( L->m.mode[q] ); FUS_MIX( L->m.ignore_alpha[q] );
+			}
+			L->fus_ku = h;
+			L->fus_ok = 1;
+#undef FUS_MIX
+			k[nk] = L->fus_k;
+			k2[nk] = L->fus_k2;
+			k3[nk] = L->fus_ku;
+			++nk;
+			if( L->m.passes == 1 ) ++n1; else ++nmulti;
+		}
+		int groupes = 0, groupes_sans_zone = 0, groupes_u = 0;
+		if( k && k2 && k3 && nk )
+		{
+			qsort( k, nk, sizeof( unsigned long long ), cmp_u64 );
+			qsort( k2, nk, sizeof( unsigned long long ), cmp_u64 );
+			qsort( k3, nk, sizeof( unsigned long long ), cmp_u64 );
+			for( int i = 0; i < nk; ++i )
+			{
+				if(( i == 0 ) || ( k[i] != k[i - 1] )) ++groupes;
+				if(( i == 0 ) || ( k2[i] != k2[i - 1] )) ++groupes_sans_zone;
+				if(( i == 0 ) || ( k3[i] != k3[i - 1] )) ++groupes_u;
+			}
+		}
+		VLOG( "SCN", "fusion par tableaux de textures (mesure) : %d lots opaques (%d a 1 couche, %d multi) "
+		             "-> %d groupes par cellule, %d sans cellule, %d par cellule a uniformes communs ; "
+		             "%d lots translucides non comptes",
+		      nk, n1, nmulti, groupes, groupes_sans_zone, groupes_u, ntr );
+		free( k );
+		free( k2 );
+		free( k3 );
+	}
+#endif
 }
 
 
@@ -1924,6 +2050,7 @@ void AddSceneToWorld( SVitaSceneGeom *p_geom, Nx::CTexDict *p_tex_dict,
 		SVitaMesh  *p_src = &p_geom->p_meshes[i];
 		SWorldMesh *p_dst = &sp_world[s_num_world];
 
+		p_dst->vao_direct = 0;
 		glGenBuffers( 1, &p_dst->vbo );
 		glBindBuffer( GL_ARRAY_BUFFER, p_dst->vbo );
 		glBufferData( GL_ARRAY_BUFFER,
@@ -2329,11 +2456,25 @@ void AddSceneToWorld( SVitaSceneGeom *p_geom, Nx::CTexDict *p_tex_dict,
 				ShaderMateriauPrecompiler( &m );
 				continue;
 			}
+#ifdef PORTMASTER
+			// R36S : variante "une couche" des translucides dessines seuls
+			// (THUG_GLSL_SINGLES) -- sinon compilee au premier dessin, en jeu.
+			if( p->texture && p->uvbo && p->cbo && !( g_vita_multitex && p->texture2 && p->uvbo2 ))
+			{
+				materiau_shader_prepare( p, &m );
+				materiau_une_couche( p, m );
+				ShaderMateriauPrecompiler( &m );
+				continue;
+			}
+#endif
 			if( !p->texture || !p->uvbo || !p->texture2 || !p->uvbo2 || !p->cbo_brut )
 				continue;
 			materiau_shader_prepare( p, &m );
 			ShaderMateriauPrecompiler( &m );
 		}
+#ifdef PORTMASTER
+		echauffer_lots();
+#endif
 		free( sp_ordre_lots );
 		sp_ordre_lots = (int *)malloc( sizeof( int ) * ( s_num_lots > 0 ? s_num_lots : 1 ));
 		if( sp_ordre_lots )
@@ -2424,6 +2565,19 @@ static int          s_appels_lots_transp = 0;
 // « fust 0/1 » : lots dans la passe translucide (dessines a leur place).
 bool g_vita_lots_transp = true;
 static int          s_transp_seuls = 0, s_transp_hors_lot = 0;
+// R36S : translucides seuls dessines par le chemin GLES direct (THUG_GLSL_SINGLES).
+static int          s_glsl_seuls = 0;
+static bool glsl_seuls_actif( void )
+{
+	static int s_v = -1;
+	if( s_v < 0 )
+	{
+		const char *e = getenv( "THUG_GLSL_SINGLES" );
+		s_v = !( e && ( strcmp( e, "0" ) == 0 ));
+		VLOG( "SHD", "translucides seuls en GLES direct : %s (THUG_GLSL_SINGLES)", s_v ? "oui" : "non" );
+	}
+	return s_v != 0;
+}
 
 // Maillages a deux couches dessines par le shader materiau (trace periodique).
 static int   s_shd_materiaux = 0;
@@ -3608,8 +3762,117 @@ static void zbias_poser( unsigned char zb )
 
 static int s_cpt_lots[4] = { 0, 0, 0, 0 };	// parcourus, champ, non occultes, precalcules
 static int s_cpt_plages = 0;
+// R36S : distance d'affichage optionnelle des LOTS (THUG_DRAW_DISTANCE, en
+// pieds, 0 = illimitee comme l'original). Les lots dont la boite est plus loin
+// que la limite ne sont pas dessines. Compromis visuel : desactive par defaut.
+// Le journal donne, toutes les 120 images, le nombre de lots dans le champ par
+// tranche de distance, pour choisir une valeur.
+static float s_cam_pos[3] = { 0.0f, 0.0f, 0.0f };
+static bool  s_cam_pos_ok = false;
+static float s_dist_max2 = -1.0f;		// carre, en pouces ; 0 = illimitee
+static unsigned s_dist_hist[6];
+static unsigned s_dist_coupes = 0;
+static bool lot_trop_loin( const float *bmin, const float *bmax )
+{
+	if( s_dist_max2 < 0.0f )
+	{
+		const char *e = getenv( "THUG_DRAW_DISTANCE" );
+		const float pieds = e ? (float)atof( e ) : 0.0f;
+		s_dist_max2 = ( pieds > 0.0f ) ? ( pieds * 12.0f ) * ( pieds * 12.0f ) : 0.0f;
+		VLOG( "SHD", "distance d'affichage des lots : %s%.0f pieds (THUG_DRAW_DISTANCE)",
+		      pieds > 0.0f ? "" : "illimitee, ", pieds );
+	}
+	if( !s_cam_pos_ok )
+		return false;
+	float d2 = 0.0f;
+	for( int c = 0; c < 3; ++c )
+	{
+		const float v = ( s_cam_pos[c] < bmin[c] ) ? ( bmin[c] - s_cam_pos[c] )
+		              : ( s_cam_pos[c] > bmax[c] ) ? ( s_cam_pos[c] - bmax[c] ) : 0.0f;
+		d2 += v * v;
+	}
+	// Tranches : < 50, 100, 200, 400, 800 pieds, au-dela.
+	static const float lim2[5] = { 600.0f * 600.0f, 1200.0f * 1200.0f, 2400.0f * 2400.0f,
+	                               4800.0f * 4800.0f, 9600.0f * 9600.0f };
+	int t = 0;
+	while(( t < 5 ) && ( d2 >= lim2[t] ))
+		++t;
+	++s_dist_hist[t];
+	if(( s_dist_max2 > 0.0f ) && ( d2 > s_dist_max2 ))
+	{
+		++s_dist_coupes;
+		return true;
+	}
+	return false;
+}
+static void lot_distance_journal( void )
+{
+	static int s_img = 0;
+	if(( ++s_img % 120 ) != 0 )
+		return;
+	VLOG( "SHD", "lots dans le champ par distance (/image) : <50 pi %u | <100 %u | <200 %u | "
+	             "<400 %u | <800 %u | au-dela %u | coupes par THUG_DRAW_DISTANCE %u",
+	      s_dist_hist[0] / 120, s_dist_hist[1] / 120, s_dist_hist[2] / 120, s_dist_hist[3] / 120,
+	      s_dist_hist[4] / 120, s_dist_hist[5] / 120, s_dist_coupes / 120 );
+	for( int t = 0; t < 6; ++t )
+		s_dist_hist[t] = 0;
+	s_dist_coupes = 0;
+}
+
+#ifdef PORTMASTER
+// Mesure par image (THUG_MESURE_FUSION) : lots opaques dessines par le chemin
+// direct, et nombre de groupes distincts parmi eux selon chaque cle.
+static unsigned long long s_fus_img[3][2048];
+static int s_fus_n = 0;
+static long s_fus_somme[4] = { 0, 0, 0, 0 };	// lots, groupes k, k2, ku
+static int s_fus_images = 0;
+static int fus_actif( void )
+{
+	static int s_on = -1;
+	if( s_on < 0 )
+		s_on = getenv( "THUG_MESURE_FUSION" ) ? 1 : 0;
+	return s_on;
+}
+static void fus_noter( const SLot *L )
+{
+	if( fus_actif() && L->fus_ok && ( s_fus_n < 2048 ))
+	{
+		s_fus_img[0][s_fus_n] = L->fus_k;
+		s_fus_img[1][s_fus_n] = L->fus_k2;
+		s_fus_img[2][s_fus_n] = L->fus_ku;
+		++s_fus_n;
+	}
+}
+static void fus_fin_image( void )
+{
+	if( !fus_actif() )
+		return;
+	int g[3] = { 0, 0, 0 };
+	for( int j = 0; j < 3; ++j )
+	{
+		qsort( s_fus_img[j], s_fus_n, sizeof( unsigned long long ), cmp_u64 );
+		for( int i = 0; i < s_fus_n; ++i )
+			if(( i == 0 ) || ( s_fus_img[j][i] != s_fus_img[j][i - 1] ))
+				++g[j];
+	}
+	s_fus_somme[0] += s_fus_n;
+	s_fus_somme[1] += g[0]; s_fus_somme[2] += g[1]; s_fus_somme[3] += g[2];
+	s_fus_n = 0;
+	if( ++s_fus_images == 120 )
+	{
+		VLOG( "SHD", "fusion par tableaux (mesure, par image) : %ld lots opaques dessines -> %ld groupes "
+		             "par cellule, %ld sans cellule, %ld par cellule a uniformes communs",
+		      s_fus_somme[0] / 120, s_fus_somme[1] / 120, s_fus_somme[2] / 120, s_fus_somme[3] / 120 );
+		s_fus_somme[0] = s_fus_somme[1] = s_fus_somme[2] = s_fus_somme[3] = 0;
+		s_fus_images = 0;
+	}
+}
+#endif
+
+static bool s_lot_echec = false;	// dernier dessiner_lot refuse (rien dessine)
 static int dessiner_lot( SLot *L, bool transp, bool shd, bool shd_mat, int &drawn )
 {
+	s_lot_echec = false;
 	// z-bias commun au lot (issue #69) : 0 pour tout lot sans decalque, donc
 	// identique a l'ancien zbias_poser( 0 ). glPolygonOffset agit tout de
 	// suite sur gxm_context (vitaGL misc.c, update_polygon_offset), y compris
@@ -3774,9 +4037,64 @@ static int dessiner_lot( SLot *L, bool transp, bool shd, bool shd_mat, int &draw
 		GxmMateriauFin();
 		GxmMateriauDebut( s_pv_shader );
 	}
-	if( shd_mat && L->m.env )
+	if( shd_mat && L->m.env && !ShaderMateriauEnvGlsl())
+	{
+		s_lot_echec = true;
 		return 0;	// idem, hors session GXM
+	}
 
+#ifdef PORTMASTER
+	// Chemin GLES direct (THUG_DIRECT_GL) : memes plages que plus bas.
+	if( shd_mat && ShaderMateriauDirectActif())
+	{
+		unsigned int tn[4];
+		unsigned char tu[4], tv[4];
+		tn[0] = L->texture; tu[0] = L->addr_u; tv[0] = L->addr_v;
+		for( int k = 1; k < L->m.passes; ++k )
+		{
+			tn[k] = L->tex_p[k - 1]; tu[k] = L->addr_pu[k - 1]; tv[k] = L->addr_pv[k - 1];
+		}
+		L->m.seuil = seuil_effectif( L->alpha_cutoff, L->texture, L->a_min_sommets,
+		                             L->m.ignore_alpha[0] );
+		static int s_df[512], s_dc[512];
+		int np = 0, first = -1, count = 0, actives = 0;
+		for( int q = 0; q < L->num_plages; ++q )
+		{
+			const SPlageLot *pl = &L->p_plages[q];
+			const bool actif = ( !pl->p_actif || *pl->p_actif )
+			    && ( !( L->multi && g_vita_cull_plages && g_vita_cull && s_cur_view_ok )
+			         || box_visible( pl->bb_min, pl->bb_max ));
+			if( actif )
+			{
+				if( first < 0 )
+					first = pl->first;
+				count += pl->count;
+				++actives;
+				continue;
+			}
+			if(( first >= 0 ) && ( np < 512 ))
+			{
+				s_df[np] = first; s_dc[np] = count; ++np;
+			}
+			first = -1; count = 0;
+		}
+		if(( first >= 0 ) && ( np < 512 ))
+		{
+			s_df[np] = first; s_dc[np] = count; ++np;
+		}
+		if( np == 0 )
+			return 0;
+		BrouillardFixeNoir((( L->blend & 0x1F ) >= 1 ) && (( L->blend & 0x1F ) <= 4 ));
+		if( ShaderMateriauDirectLot( &L->m, tn, tu, tv, L->ibo, &L->vao_direct, s_df, s_dc, np ))
+		{
+			if( !transp )
+				fus_noter( L );
+			drawn += actives;
+			return np;
+		}
+	}
+	ShaderMateriauDirectFin();		// la suite passe par gl4es
+#endif
 	if( shd_mat )
 	{
 		for( int k = L->m.passes - 1; k >= 1; --k )
@@ -3790,8 +4108,11 @@ static int dessiner_lot( SLot *L, bool transp, bool shd, bool shd_mat, int &draw
 		poser_adressage( L->addr_u, L->addr_v );
 		L->m.seuil = seuil_effectif( L->alpha_cutoff, L->texture, L->a_min_sommets,
 		                             L->m.ignore_alpha[0] );
-		if( !ShaderMateriauMaillage( &L->m ))
+		if( !ShaderMateriauMaillage( &L->m, &L->vao ))
+		{
+			s_lot_echec = true;
 			return 0;		// pas de variante : lot saute plutot que mal dessine
+		}
 		glBindBuffer( GL_ELEMENT_ARRAY_BUFFER, L->ibo );
 	}
 	else if( shd )
@@ -3871,6 +4192,82 @@ static int dessiner_lot( SLot *L, bool transp, bool shd, bool shd_mat, int &draw
 	return n_appels_lots;
 }
 
+
+#ifdef PORTMASTER
+// R36S : le pilote Mali finit la compilation d'un programme -- et prepare son
+// etat de melange -- au PREMIER dessin qui l'utilise. Programmes lies au
+// chargement ou pas, la premiere image d'un niveau payait tout (854 ms a NJ),
+// puis chaque nouveau materiau un a-coup. Ici, au chargement, chaque lot est
+// dessine une fois avec son vrai melange mais un ciseau vide : rien n'est
+// trace, le pilote fait son travail pendant l'ecran de chargement.
+// THUG_WARMUP=0 : comme avant.
+static void echauffer_lots( void )
+{
+	static int s_on = -1;
+	if( s_on < 0 )
+	{
+		const char *e = getenv( "THUG_WARMUP" );
+		s_on = !( e && ( strcmp( e, "0" ) == 0 ));
+	}
+	if( !s_on || !sp_lots || !s_num_lots || !ShaderMateriauPret() || !ShaderMateriauDirectActif() )
+		return;
+	const SceUInt64 t0 = sceKernelGetProcessTimeWide();
+	static const float ident[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+	const GLboolean sc = glIsEnabled( GL_SCISSOR_TEST ), bl = glIsEnabled( GL_BLEND );
+	GLint box[4] = { 0, 0, 0, 0 }, src = GL_ONE, dst = GL_ZERO, eq = GL_FUNC_ADD;
+	glGetIntegerv( GL_SCISSOR_BOX, box );
+	glGetIntegerv( GL_BLEND_SRC_RGB, &src );
+	glGetIntegerv( GL_BLEND_DST_RGB, &dst );
+	glGetIntegerv( GL_BLEND_EQUATION_RGB, &eq );
+	// Etat de profondeur du jeu (certains pilotes en font une variante de shader).
+	const GLboolean dt = glIsEnabled( GL_DEPTH_TEST );
+	GLint dfunc = GL_LESS;
+	GLboolean dmask = GL_TRUE;
+	glGetIntegerv( GL_DEPTH_FUNC, &dfunc );
+	glGetBooleanv( GL_DEPTH_WRITEMASK, &dmask );
+	glEnable( GL_DEPTH_TEST );
+	glDepthFunc( profondeur_decor());
+	glEnable( GL_SCISSOR_TEST );
+	// Un pixel (coin) plutot qu'un ciseau vide : un pilote peut sauter un
+	// dessin vide sans compiler. Pixel recouvert par l'image suivante.
+	glScissor( 0, 0, 1, 1 );
+	ShaderMateriauDebut( ident );
+	int drawn = 0, n = 0;
+	for( int l = 0; l < s_num_lots; ++l )
+	{
+		SLot *L = &sp_lots[l];
+		if( L->multi && !g_vita_lots_multi )
+			continue;
+		const bool transp = (( L->mat_flags0 & 0x40 ) != 0 )
+		    || ( g_vita_melange_opaques && melange_hors_drapeau( L->blend, L->mat_flags0 ));
+		const bool voulu = g_vita_transp_flag ? transp : ( L->blend != 0 );
+		if( voulu )
+			glEnable( GL_BLEND );
+		else
+			glDisable( GL_BLEND );
+		glDepthMask( voulu ? ( g_vita_zwrite_transp ? GL_TRUE : GL_FALSE ) : GL_TRUE );
+		dessiner_lot( L, voulu, true, true, drawn );
+		++n;
+	}
+	ShaderMateriauFin();
+	zbias_poser( 0 );
+	glDisable( GL_CULL_FACE );
+	s_cull_cour = -1;
+	glBlendEquation( (GLenum)eq );
+	glBlendFunc( (GLenum)src, (GLenum)dst );
+	if( bl ) glEnable( GL_BLEND ); else glDisable( GL_BLEND );
+	glScissor( box[0], box[1], box[2], box[3] );
+	if( !sc )
+		glDisable( GL_SCISSOR_TEST );
+	glDepthFunc( (GLenum)dfunc );
+	glDepthMask( dmask );
+	if( !dt )
+		glDisable( GL_DEPTH_TEST );
+	glFinish();		// le pilote termine ici, pas a la premiere image
+	VLOG( "SHD", "echauffement : %d lots dessines hors champ en %.1f ms (THUG_WARMUP)",
+	      n, (float)( sceKernelGetProcessTimeWide() - t0 ) / 1000.0f );
+}
+#endif
 
 static unsigned int s_cle_tri_lot( const SLot *L )
 {
@@ -4359,10 +4756,41 @@ static void ombre_reception( bool translucides = false, int rang_transp = -1, in
 // (g_vita_vcw est defini pres de SWorldMesh.)
 static bool s_vcw_ecrit = false;		// des couleurs animees sont en place
 
-static inline unsigned char *vcw_donnees( GLuint nom )
+// VitaGL exposes the backing memory through its buffer handle. PortMaster
+// must map the GL buffer and unmap it before the renderer can use it again.
+class WorldBufferAccess
 {
-	return nom ? *(unsigned char * const *)nom : NULL;
-}
+public:
+	explicit WorldBufferAccess( GLuint name, bool write = false )
+		: m_name( name ), m_data( NULL )
+	{
+		if( !name )
+			return;
+#ifdef PORTMASTER
+		m_data = static_cast<unsigned char *>( glMapNamedBufferEXT(
+			name, write ? GL_READ_WRITE : GL_READ_ONLY ));
+#else
+		m_data = *reinterpret_cast<unsigned char * const *>( name );
+#endif
+	}
+
+	~WorldBufferAccess()
+	{
+#ifdef PORTMASTER
+		if( m_data )
+			glUnmapNamedBufferEXT( m_name );
+#endif
+	}
+
+	unsigned char *data() const { return m_data; }
+
+private:
+	WorldBufferAccess( const WorldBufferAccess & );
+	WorldBufferAccess &operator=( const WorldBufferAccess & );
+
+	GLuint m_name;
+	unsigned char *m_data;
+};
 
 // --- Sommets de rendu des secteurs (#5), voir p_world_render.h --------------
 #define VS_MAX_MAILLAGES 16
@@ -4427,9 +4855,11 @@ SVitaSommets *VitaSommetsCreer( unsigned int cs, int scene )
 	for( int k = 0; k < nm; ++k )
 	{
 		const SWorldMesh *p = mm[k];
-		const unsigned short *p_ind = (const unsigned short *)vcw_donnees( p->ibo );
+		const WorldBufferAccess indices( p->ibo );
+		const WorldBufferAccess positions( p->vbo );
+		const unsigned short *p_ind = reinterpret_cast<const unsigned short *>( indices.data() );
 		p_util[k] = ( p->num_vertices > 0 ) ? (unsigned char *)calloc( p->num_vertices, 1 ) : NULL;
-		if( !p_ind || !p_util[k] || !vcw_donnees( p->vbo ))
+		if( !p_ind || !p_util[k] || !positions.data())
 		{
 			static int s_tr_ill = 0;	// plafonne : rappele a chaque image en edition de rail
 			if( s_tr_ill++ < 4 )
@@ -4517,19 +4947,11 @@ void VitaSommetsLire( const SVitaSommets *s, int rot, const float *pos, float *o
 	const float px = s->prive ? 0.0f : pos[0], py = s->prive ? 0.0f : pos[1], pz = s->prive ? 0.0f : pos[2];
 	for( int k = 0; k < s->nm; ++k )
 	{
-		const float *p_src = NULL;
-		int nv = 0;
-		if( s->prive && s->vbo[k] )
-		{
-			p_src = (const float *)vcw_donnees( s->vbo[k] );
-			const SWorldMesh *p = vs_maillage( s->cs, s->scene, s->mesh_no[k] );
-			nv = p ? p->num_vertices : 0;
-		}
-		else
-		{
-			const SWorldMesh *p = vs_maillage( s->cs, s->scene, s->mesh_no[k] );
-			if( p ) { p_src = (const float *)vcw_donnees( p->vbo ); nv = p->num_vertices; }
-		}
+		const SWorldMesh *p = vs_maillage( s->cs, s->scene, s->mesh_no[k] );
+		const GLuint name = ( s->prive && s->vbo[k] ) ? s->vbo[k] : ( p ? p->vbo : 0 );
+		const WorldBufferAccess positions( name );
+		const float *p_src = reinterpret_cast<const float *>( positions.data() );
+		const int nv = p ? p->num_vertices : 0;
 		for( int r = 0; r < s->n; ++r )
 		{
 			if( s->p_mesh[r] != s->mesh_no[k] )
@@ -4555,7 +4977,8 @@ void VitaSommetsEcrire( SVitaSommets *s, const float *in )
 	for( int k = 0; k < s->nm; ++k )
 	{
 		const SWorldMesh *p = vs_maillage( s->cs, s->scene, s->mesh_no[k] );
-		const float *p_src = p ? (const float *)vcw_donnees( p->vbo ) : NULL;
+		const WorldBufferAccess positions( p ? p->vbo : 0 );
+		const float *p_src = reinterpret_cast<const float *>( positions.data() );
 		if( !p_src || ( p->num_vertices <= 0 ))
 			continue;
 		// Tampon complet du secteur (l'ibo l'indexe tel quel) : source pour
@@ -4663,9 +5086,10 @@ static void vcw_mettre_a_jour( void )
 		const SVitaVcw *w = p->p_vcw;
 		if( !w )
 			continue;
-		unsigned char *p_cbo  = vcw_donnees( p->cbo );
-		unsigned char *p_brut = ( p->cbo_brut && ( p->cbo_brut != p->cbo ))
-		                        ? vcw_donnees( p->cbo_brut ) : NULL;
+		const WorldBufferAccess colors( p->cbo, true );
+		const WorldBufferAccess raw_colors( p->cbo_brut != p->cbo ? p->cbo_brut : 0, true );
+		unsigned char *p_cbo = colors.data();
+		unsigned char *p_brut = raw_colors.data();
 		if( !p_cbo )
 			continue;
 		// Couleurs des sequences, deja converties en 0..255.
@@ -4751,12 +5175,59 @@ static bool s_bb_ecrit = false;
 // Copie des 4 positions dans le vbo du LOT du billboard (issue #69, « bbl ») :
 // ecrite meme quand le lot ne le dessine pas (bbl 0), pour qu'il soit a jour
 // au retour de la bascule.
+// R36S : sous gl4es, rendre un tampon ouvert en ecriture le renvoie EN ENTIER
+// au GPU. Un lot de billboards etait donc renvoye une fois par billboard et
+// par image (NJ : 87 billboards dans 8 lots). Ici on ecrit dans la copie CPU
+// de gl4es (ouverture en lecture : rien n'est renvoye) et chaque lot touche
+// part une seule fois, a la fin de bb_mettre_a_jour.
+// THUG_BB_BATCH_UPLOAD=0 : un envoi par billboard, comme avant.
+static int s_bb_groupe = -1;
+static int s_bb_lots_sales[1024];
+static int s_bb_n_sales = 0;
+static bool bb_groupe_actif( void )
+{
+	if( s_bb_groupe < 0 )
+	{
+		const char *e = getenv( "THUG_BB_BATCH_UPLOAD" );
+		s_bb_groupe = !( e && ( strcmp( e, "0" ) == 0 ));
+		VLOG( "SHD", "billboards : un envoi par lot et par image : %s (THUG_BB_BATCH_UPLOAD)",
+		        s_bb_groupe ? "oui" : "non" );
+	}
+	return s_bb_groupe != 0;
+}
+static void bb_lots_envoyer( void )
+{
+	for( int i = 0; i < s_bb_n_sales; ++i )
+	{
+		const int l = s_bb_lots_sales[i];
+		if(( l >= 0 ) && ( l < s_num_lots ))
+		{
+			const WorldBufferAccess envoi( sp_lots[l].vbo, true );	// renvoi complet, une fois
+		}
+	}
+	s_bb_n_sales = 0;
+}
 static inline void bb_ecrire_lot( const SWorldMesh *p, const float pos[4][3] )
 {
 	if( !p->lot_bb || ( p->lot_idx < 0 ) || ( p->lot_idx >= s_num_lots ))
 		return;
 	const SLot *L = &sp_lots[p->lot_idx];
-	float *d = (float *)vcw_donnees( L->vbo );
+	bool groupe = bb_groupe_actif();
+	if( groupe )
+	{
+		int i = 0;
+		while(( i < s_bb_n_sales ) && ( s_bb_lots_sales[i] != p->lot_idx ))
+			++i;
+		if( i == s_bb_n_sales )
+		{
+			if( s_bb_n_sales < (int)( sizeof( s_bb_lots_sales ) / sizeof( s_bb_lots_sales[0] )))
+				s_bb_lots_sales[s_bb_n_sales++] = p->lot_idx;
+			else
+				groupe = false;		// liste pleine : envoi immediat
+		}
+	}
+	const WorldBufferAccess positions( L->vbo, !groupe );
+	float *d = reinterpret_cast<float *>( positions.data() );
 	if( !d )
 		return;
 	for( int v = 0; v < 4; ++v )
@@ -4823,12 +5294,14 @@ static void bb_mettre_a_jour( Gfx::Camera *p_cam )
 		for( int li = 0; li < s_bb_n; ++li )
 		{
 			SWorldMesh *p = &sp_world[s_bb_liste[li]];
-			float *p_pos = (float *)vcw_donnees( p->vbo );
+			const WorldBufferAccess positions( p->vbo, true );
+			float *p_pos = reinterpret_cast<float *>( positions.data() );
 			if( p->p_bb && p_pos )
 				memcpy( p_pos, p->p_bb->orig, sizeof( p->p_bb->orig ));
 			if( p->p_bb )
 				bb_ecrire_lot( p, p->p_bb->orig );		// #69, « bbl »
 		}
+		bb_lots_envoyer();
 		s_bb_ecrit = false;
 		VLOG( "SCN", "billboards : positions du fichier remises (%d)", s_bb_n );
 		return;
@@ -4853,7 +5326,8 @@ static void bb_mettre_a_jour( Gfx::Camera *p_cam )
 	{
 		SWorldMesh *p = &sp_world[s_bb_liste[li]];
 		const SVitaBillboard *b = p->p_bb;
-		float *p_pos = (float *)vcw_donnees( p->vbo );
+		const WorldBufferAccess positions( p->vbo, true );
+		float *p_pos = reinterpret_cast<float *>( positions.data() );
 		if( !b || !p_pos )
 			continue;
 		float r_[3], h_[3], a_[3];
@@ -4887,6 +5361,7 @@ static void bb_mettre_a_jour( Gfx::Camera *p_cam )
 		}
 		bb_ecrire_lot( p, pos );		// #69, « bbl »
 	}
+	bb_lots_envoyer();
 }
 
 // --- Teinte de scene par secteur (issue #63) --------------------------------
@@ -4940,7 +5415,7 @@ static void facteur_teinte( const float c0[3], unsigned int flags0,
 // Issue #15 : ce calcul porte sur TOUT le decor a chaque pas d'un changement
 // d'heure progressif (dynamic_tod, un pas toutes les 10 images) : 1,13 million
 // de sommets a NJ, 118 ms par pas mesures (~105 ns par sommet, quasi tout en
-// ecritures dans la memoire NON CACHEE des tampons, voir vcw_donnees).
+// ecritures dans la memoire NON CACHEE des tampons, voir WorldBufferAccess).
 // D'ou : NEON, 4 sommets par ecriture de 16 octets alignee (facteurs sur 7
 // bits de fraction, arrondi et saturation par vqrshrn) quand les trois
 // facteurs sont < 2 -- le cas normal, c0 valant 0,5 le plus souvent ; sinon
@@ -4966,24 +5441,28 @@ bool g_vita_teinte_neon = true;
 static void teinter_tampon( GLuint nom, unsigned char **pp_orig, int n_total,
                             int premier, int nombre, const float f[3] )
 {
-	unsigned char *d = vcw_donnees( nom );
-	if( !d || ( n_total <= 0 ))
+	if( !nom || ( n_total <= 0 ))
 		return;
-	if( !*pp_orig )
-	{
-		if(( f[0] == 1.0f ) && ( f[1] == 1.0f ) && ( f[2] == 1.0f ))
-			return;		// jamais teinte : le tampon est deja l'origine
-		*pp_orig = (unsigned char *)malloc( 4 * n_total );
-		if( !*pp_orig )
-			return;
-		memcpy( *pp_orig, d, 4 * n_total );
-	}
+	if( !*pp_orig && ( f[0] == 1.0f ) && ( f[1] == 1.0f ) && ( f[2] == 1.0f ))
+		return;	// The original colors are already in the buffer.
 	if( premier < 0 )
 		premier = 0;
 	if( premier + nombre > n_total )
 		nombre = n_total - premier;
 	if( nombre <= 0 )
 		return;
+
+	const WorldBufferAccess colors( nom, true );
+	unsigned char *d = colors.data();
+	if( !d )
+		return;
+	if( !*pp_orig )
+	{
+		*pp_orig = (unsigned char *)malloc( 4 * n_total );
+		if( !*pp_orig )
+			return;
+		memcpy( *pp_orig, d, 4 * n_total );
+	}
 	s_teinte_sommets += nombre;
 	const unsigned int fr = (unsigned int)( f[0] * 256.0f + 0.5f );
 	const unsigned int fg = (unsigned int)( f[1] * 256.0f + 0.5f );
@@ -5363,6 +5842,27 @@ void VitaMondeFin( void )
 	VitaMondeEtape( -1 );
 	if( !g_vita_prof_monde )
 		return;
+	{
+		// R36S : detail d'UNE image de monde lente (> 80 ms) -- premiere image
+		// d'un niveau, premier usage d'un materiau...
+		static SceUInt64 s_prev[MW_N];
+		SceUInt64 d[MW_N], somme_us = 0;
+		for( int e = 0; e < MW_N; ++e )
+		{
+			d[e] = ( s_mw_acc[e] >= s_prev[e] ) ? s_mw_acc[e] - s_prev[e] : s_mw_acc[e];
+			s_prev[e] = s_mw_acc[e];
+			somme_us += d[e];
+		}
+		if( somme_us > 80000 )
+			VLOG( "PROF", "image de monde lente %.1f ms : vcw %.1f bb %.1f vue %.1f listes %.1f ciel %.1f | "
+			              "lots %.1f serie %.1f passe1 %.1f ombre %.1f | transp %.1f tri %.1f fin %.1f | "
+			              "part.anc %.1f part.nouv %.1f reportes %.1f rejeu %.1f peau %.1f",
+			      somme_us / 1000.0f, d[MW_VCW] / 1000.0f, d[MW_BB] / 1000.0f, d[MW_VUE] / 1000.0f,
+			      d[MW_LISTES] / 1000.0f, d[MW_CIEL] / 1000.0f, d[MW_LOTS] / 1000.0f, d[MW_SERIE] / 1000.0f,
+			      d[MW_PASSE1] / 1000.0f, d[MW_OMBRE] / 1000.0f, d[MW_TRANSP] / 1000.0f, d[MW_TRI] / 1000.0f,
+			      d[MW_FIN] / 1000.0f, d[MW_PART_A] / 1000.0f, d[MW_PART_N] / 1000.0f,
+			      d[MW_REPORTES] / 1000.0f, d[MW_REP_REJEU] / 1000.0f, d[MW_REP_PEAU] / 1000.0f );
+	}
 	if(( ++s_mw_img % 120 ) != 0 )
 		return;
 	float ms[MW_N];
@@ -5428,6 +5928,47 @@ static void compter_hors_lot( const SWorldMesh *p )
 		++s_hl[HL_AUTRE];		// ex. multi-passes sans couleurs de sommets au chargement
 }
 
+static void materiau_une_couche( const SWorldMesh *p, SShaderMateriau &m )
+{
+	m.passes = 1;
+	m.uvbo[1] = m.uvbo[2] = m.uvbo[3] = 0;
+	if( p->cbo_brut && ( p->cbo_brut != p->cbo ))
+		m.cbo = p->cbo_brut;
+	else
+	{
+		m.cbo = p->cbo;
+		m.c[0][0] = m.c[0][1] = m.c[0][2] = 0.5f;
+	}
+	if( !g_vita_alpha_fixe_une )
+		m.fixe0 = false;
+	m.ignore_alpha[0] = g_vita_ignore_vertex_alpha && (( p->mat_flags0 & 0x1000 ) != 0 );
+	m.seuil = seuil_effectif( p->alpha_cutoff, p->texture, 0, m.ignore_alpha[0] );
+}
+
+#ifdef PORTMASTER
+// R36S : le Mali ne commence l'image qu'au glFlush ou a la presentation ; sans
+// rien d'autre, tout le travail GPU de l'image (~17 ms mesures dans le swap a
+// NJ) suit tout le travail CPU au lieu de se faire en meme temps. Un glFlush en
+// fin de passe lance le GPU sur ce qui est deja soumis pendant que le CPU
+// prepare la suite. Prix : une ecriture/relecture des tuiles par flush.
+// THUG_FLUSH_PASSES = masque : 1 ciel, 2 opaques (+ombre), 4 translucides,
+// 8 triee. 0 = aucun (comportement d'avant). Defaut 10 (opaques + triee).
+static void flush_passe( int pass, int rang_ciel, int rang_opaque, int rang_transp )
+{
+	static int s_masque = -1;
+	if( s_masque < 0 )
+	{
+		const char *e = getenv( "THUG_FLUSH_PASSES" );
+		s_masque = e ? atoi( e ) : 10;
+		VLOG( "SHD", "glFlush en fin de passe : masque %d (THUG_FLUSH_PASSES)", s_masque );
+	}
+	const int bit = ( pass == rang_ciel ) ? 1 : ( pass == rang_opaque ) ? 2
+	              : ( pass == rang_transp ) ? 4 : 8;
+	if( s_masque & bit )
+		glFlush();
+}
+#endif
+
 void RenderWorld( void )
 {
 	VitaMondeEtape( MW_VCW );
@@ -5472,6 +6013,15 @@ void RenderWorld( void )
 	Gfx::Camera *p_cam = Nx::CViewportManager::sGetActiveCamera( 0 );
 	VitaMondeEtape( MW_BB );		// cout CPU des billboards (#69)
 	bb_mettre_a_jour( p_cam );
+	if( p_cam )
+	{
+		Mth::Vector &cp = p_cam->GetPos();
+		s_cam_pos[0] = cp[0]; s_cam_pos[1] = cp[1]; s_cam_pos[2] = cp[2];
+		s_cam_pos_ok = true;
+	}
+	else
+		s_cam_pos_ok = false;
+	lot_distance_journal();
 	VitaMondeEtape( MW_VUE );
 
 	// Battement plutot qu'une trace unique : la camera n'existe qu'une fois le
@@ -6049,6 +6599,8 @@ void RenderWorld( void )
 			    && !box_visible( L->bb_min, L->bb_max ))
 				continue;
 			++s_cpt_lots[1];
+			if( lot_trop_loin( L->bb_min, L->bb_max ))
+				continue;
 			// Un lot couvre une cellule de grille entiere : il est rarement
 			// cache en totalite, donc l'occlusion y mord beaucoup moins que
 			// sur les maillages pris un a un. Le test reste juste, et bon
@@ -6093,6 +6645,9 @@ void RenderWorld( void )
 			}
 		}
 
+#ifdef PORTMASTER
+		fus_fin_image();
+#endif
 		{
 			static SceUInt64 s_us_lots = 0;
 			static int s_n_lots = 0, s_img_lots = 0;
@@ -6261,14 +6816,32 @@ void RenderWorld( void )
 		// de son premier maillage dans la liste triee par draw_order. Un lot a
 		// un seul materiau, donc un seul draw_order : l'ordre Xbox est tenu,
 		// et 545 dessins un par un redeviennent quelques dizaines (mesure).
+		// R36S : les lots multi-couches (2 couches, sans reflet) passent aussi
+		// par ici ; ils etaient dessines maillage par maillage (~130 par image
+		// a NJ, "en lot multi (dessines seuls)"). THUG_TRANSP_MULTI_LOTS=0
+		// rend l'ancien comportement. Un lot refuse par le shader retombe au
+		// dessin un par un.
+		if( s_lots_transp_multi < 0 )
+		{
+			const char *e = getenv( "THUG_TRANSP_MULTI_LOTS" );
+			s_lots_transp_multi = !( e && ( strcmp( e, "0" ) == 0 ));
+			VLOG( "SHD", "lots multi-couches translucides : %s (THUG_TRANSP_MULTI_LOTS)",
+			        s_lots_transp_multi ? "en lot" : "un par un" );
+		}
 		if(( pass == RANG_TRANSP ) && g_vita_lots && p->dans_lot && ( p->lot_idx >= 0 )
-		    && ( p->lot_idx < s_num_lots ) && !p->lot_multi && lots_transp_shd )
+		    && ( p->lot_idx < s_num_lots ) && lots_transp_shd
+		    && ( !p->lot_multi
+		         || ( s_lots_transp_multi && g_vita_lots_multi && sp_lots[p->lot_idx].multi
+		              && ( !sp_lots[p->lot_idx].m.env || ShaderMateriauEnvGlsl())
+		              && !s_lot_refus[p->lot_idx] )))
 		{
 			SLot *L = &sp_lots[p->lot_idx];
+			bool refuse = false;
 			if( s_lot_image[p->lot_idx] != s_image_courante )
 			{
 				s_lot_image[p->lot_idx] = s_image_courante;
-				if( !( g_vita_cull && s_cur_view_ok && !box_visible( L->bb_min, L->bb_max )))
+				if( !( g_vita_cull && s_cur_view_ok && !box_visible( L->bb_min, L->bb_max ))
+				    && !lot_trop_loin( L->bb_min, L->bb_max ))
 				{
 					// Le programme reste actif d'un lot au suivant ; il n'est
 					// rendu qu'au premier maillage qui passe par le pipeline fixe.
@@ -6287,6 +6860,13 @@ void RenderWorld( void )
 					{
 						const int na = dessiner_lot( L, true, true, true, drawn );
 						s_appels_lots_transp += na;
+						if( s_lot_echec && p->lot_multi )
+						{
+							s_lot_refus[p->lot_idx] = 1;
+							s_lot_image[p->lot_idx] = 0;
+							refuse = true;
+							VLOG( "SHD", "lot multi translucide %d refuse : un par un", p->lot_idx );
+						}
 						if( L->bb )
 							s_bbl_appels += na;		// issue #69
 						if( L->zbias )
@@ -6297,7 +6877,9 @@ void RenderWorld( void )
 					}
 				}
 			}
-			continue;
+			if( !refuse )
+				continue;
+			// Lot refuse : ce maillage est dessine seul, plus bas.
 		}
 		// Couche en REFLET (issue #5), toutes passes du decor : chemin GXM, seul
 		// a savoir generer les coordonnees de reflet.
@@ -6459,6 +7041,82 @@ void RenderWorld( void )
 		// fixe (texture x sommets, pas d'alpha FIXE, alpha des sommets ignore
 		// seulement avec « iva »), et BRIGHTEN_FIXED prend le melange de
 		// BRIGHTEN, comme la table de RenderWorld.
+#ifdef PORTMASTER
+		// R36S : translucides SEULS (hors lot) par le chemin GLES direct, comme
+		// la route GXM "gxt" ci-dessous sur Vita (meme preparation du materiau)
+		// mais en GLSL. Avant : pipeline fixe emule par gl4es, ~100 us par
+		// maillage (NJ : ~40 par image). Couvre 1 couche, 2+ couches, UV
+		// wibble et reflets. THUG_GLSL_SINGLES=0 : comme avant.
+		if((( pass == RANG_TRANSP ) || ( pass == RANG_TRI )) && glsl_seuls_actif()
+		    && ShaderMateriauDirectActif() && s_cur_view_ok && !g_vita_id_debug && !g_vita_mat_debug
+		    && (( g_vita_shader_decor == 1 ) || ( g_vita_shader_decor == 3 ))
+		    && ShaderMateriauPret() && !p->is_sky && p->texture && p->uvbo && p->cbo
+		    && ( p->vao_direct != ~0u ))
+		{
+			SShaderMateriau m;
+			bool pret = false;
+			GLuint tg[4] = { p->texture, p->texture2, p->texture_x[0], p->texture_x[1] };
+			const unsigned char au[4] = { p->addr_u, p->addr2_u, p->addr_xu[0], p->addr_xu[1] };
+			const unsigned char av[4] = { p->addr_v, p->addr2_v, p->addr_xv[0], p->addr_xv[1] };
+			if( p->nbo && ( p->texture_env || p->env0 ))
+			{
+				if( g_vita_env && ShaderMateriauEnvGlsl() && materiau_env_prepare( p, &m ))
+				{
+					tg[1] = p->texture_env ? p->texture_env : p->texture2;
+					tg[2] = p->texture_x[0] ? p->texture_x[0] : p->texture_envx[0];
+					tg[3] = p->texture_x[1] ? p->texture_x[1] : p->texture_envx[1];
+					pret = true;
+				}
+			}
+			else
+			{
+				const bool deux = materiau_shader_ok( p, false );
+				const bool une = !deux && !( g_vita_multitex && p->texture2 && p->uvbo2 );
+				if( une || deux )
+				{
+					materiau_shader_prepare( p, &m );
+					if( une )
+						materiau_une_couche( p, m );
+					pret = true;
+				}
+			}
+			if( pret )
+			{
+				switch( p->blend )
+				{
+					case 1:  case 2:  glBlendFunc( GL_SRC_ALPHA, GL_ONE ); break;
+					case 3:  case 4:  glBlendFunc( GL_SRC_ALPHA, GL_ONE );
+					                  glBlendEquation( GL_FUNC_REVERSE_SUBTRACT ); break;
+					case 7:  case 8:  glBlendFunc( GL_ZERO, GL_SRC_ALPHA ); break;
+					case 9:  case 10: glBlendFunc( GL_DST_COLOR, GL_ONE ); break;
+					default:          glBlendFunc( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA ); break;
+				}
+				if(( p->blend != 3 ) && ( p->blend != 4 ))
+					glBlendEquation( GL_FUNC_ADD );
+				BrouillardFixeNoir((( p->blend & 0x1F ) >= 1 ) && (( p->blend & 0x1F ) <= 4 ));
+				if( !shd_transp_actif )
+				{
+					ShaderMateriauDebut( s_pv_shader );
+					shd_transp_actif = true;
+				}
+				zbias_poser( p->zbias ); cull_poser( p->no_bfc || p->is_sky );
+				const int d_first = 0, d_count = p->num_indices;
+				if( ShaderMateriauDirectLot( &m, tg, au, av, p->ibo, &p->vao_direct,
+				                             &d_first, &d_count, 1, GL_TRIANGLE_STRIP ))
+				{
+					++s_glsl_seuls;
+					if( pass == RANG_TRANSP )
+					{
+						++s_transp_seuls;
+						if( !p->dans_lot ) ++s_transp_hors_lot;
+					}
+					++drawn;
+					continue;
+				}
+				ShaderMateriauDirectFin();
+			}
+		}
+#endif
 		bool gxt_essaye = false;
 		if((( pass == RANG_TRANSP ) || ( pass == RANG_TRI )) && g_vita_gxm_transp && !gxs_essaye
 		    && g_vita_gxm_direct && s_cur_view_ok && !g_vita_id_debug && !g_vita_mat_debug
@@ -6822,9 +7480,10 @@ void RenderWorld( void )
 			      s_us[0] / 120000.0f, s_n[0] / 120, s_us[1] / 120000.0f, s_n[1] / 120,
 			      s_us[2] / 120000.0f, s_n[2] / 120, s_us[3] / 120000.0f, s_n[3] / 120 );
 			VLOG( "SHD", "translucides : %d appels de lots, %d maillages seuls "
-			             "(%d hors lot, %d en GXM direct) par image ; %d maillages avec reflet",
+			             "(%d hors lot, %d en GXM direct, %d en GLES direct) par image ; %d maillages avec reflet",
 			      s_appels_lots_transp / 120, s_transp_seuls / 120, s_transp_hors_lot / 120,
-			      s_transp_gxm / 120, s_env_dessines / 120 );
+			      s_transp_gxm / 120, s_glsl_seuls / 120, s_env_dessines / 120 );
+			s_glsl_seuls = 0;
 			VLOG( "SHD", "UV wibble : %d maillages a une couche par image (GXM, #43)",
 			      s_uvw_dessines / 120 );
 			// Issue #69 : translucides visibles hors lot, par critere de
@@ -6908,6 +7567,9 @@ void RenderWorld( void )
 		glDepthFunc( profondeur_decor());	// « zeq »
 		glDepthMask( GL_TRUE );
 	}
+#ifdef PORTMASTER
+	flush_passe( pass, RANG_CIEL, RANG_OPAQUE, RANG_TRANSP );
+#endif
 
 	}
 	VitaMondeEtape( MW_FIN );

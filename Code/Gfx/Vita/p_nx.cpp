@@ -69,6 +69,9 @@ void VitaLibererDifferes( void );
 extern bool g_vita_image_ouverte;
 }
 extern "C" { extern int vita_glspy_ouverte, vita_glspy_phase; void vita_glspy_bilan( void ); }
+#ifdef PORTMASTER
+extern "C" volatile unsigned g_portmaster_crash_stage;
+#endif
 namespace Nx { void VitaBudgetEclairageImage( void ); }
 namespace Nx {
 
@@ -634,7 +637,9 @@ void	CEngine::s_plat_start_engine()
 	// (camera.qb) pose l'aspect 1,7778 et widescreen_camera_fov = 88,18 :
 	// meme champ VERTICAL que les 72 degres en 4:3, le cadrage XBox (xemu).
 	// Sans lui, 72 degres a l'horizontale en 16:9 zoomaient l'image de 1,3.
+#ifndef PORTMASTER
 	Script::RunScript( "screen_setup_widescreen" );
+#endif
 }
 
 // « mem 0/1 » : sonde periodique du tas et des pools vitaGL.
@@ -669,6 +674,23 @@ void	CEngine::s_plat_pre_render()
 {
 	ACC( ACC_DEBUT );
 	VITA_STUB();
+#ifdef PORTMASTER
+	{	// Menus : image 4:3, le presenteur remplit le reste de l'ecran en miroir.
+		// Signe des menus : presque pas de decor (le menu principal en a 4
+		// maillages, un niveau des milliers ; le mode de jeu « front-end »
+		// n'est pas pose sur ce menu).
+		const int menu = ( NxVita::NombreMaillagesMonde() < 64 ) ? 1 : 0;
+		if( menu )
+			g_thug_present_mirror = 1;
+		static int s_menu = -1;
+		if( menu != s_menu )
+		{
+			s_menu = menu;
+			VLOG( "VIDEO", "menus : %s (%d maillages de decor)", menu ? "oui" : "non",
+			      NxVita::NombreMaillagesMonde());
+		}
+	}
+#endif
 
 	// Nouvelle frame : la vue partagee des modeles sera recalculee par le
 	// premier modele rendu, puis reutilisee par tous -- une camera par frame.
@@ -765,9 +787,17 @@ void	CEngine::s_plat_pre_render()
 
 void	CEngine::s_plat_post_render()
 {
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 7;
+#endif
 	vita_glspy_phase = 3;
 	ACC( ACC_POST0 );
 	VITA_STUB();
+#ifdef PORTMASTER
+	static int s_diag_frames = 0;
+	const bool diag = ( s_diag_frames++ < 3 );
+	if( diag ) VLOG( "CRASH", "post-render: enter" );
+#endif
 
 	// Presentation. C'etait un stub vide : le moteur dessinait sans que rien
 	// n'atteigne jamais l'ecran, hors ecran de chargement (qui a son propre
@@ -781,6 +811,9 @@ void	CEngine::s_plat_post_render()
 		static float s_pri[256];
 		const SceUInt64 t2d = sceKernelGetProcessTimeWide();
 		const int n = NxVita::TextePriorites( s_pri, 256 );
+#ifdef PORTMASTER
+		if( diag ) VLOG( "CRASH", "post-render: 2D priorities=%d", n );
+#endif
 		float bas = -FLT_MAX;
 		for( int i = 0; i < n; ++i )
 		{
@@ -789,6 +822,9 @@ void	CEngine::s_plat_post_render()
 			bas = s_pri[i];
 		}
 		NxVita::RenderSprites2D( bas, FLT_MAX );
+#ifdef PORTMASTER
+		if( diag ) VLOG( "CRASH", "post-render: 2D complete" );
+#endif
 
 		// Issue #17 (menu View Stats) : cout CPU de la tranche 2D, en moyenne
 		// sur 120 images, avec le nombre de tranches de priorite, de glyphes
@@ -814,6 +850,9 @@ void	CEngine::s_plat_post_render()
 		}
 	}
 	ACC( ACC_2D );
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 8;
+#endif
 
 	// Affichage de debogage PAR-DESSUS tout le reste, juste avant de
 	// presenter. Le temps de frame se mesure ici : c'est le seul endroit
@@ -831,12 +870,18 @@ void	CEngine::s_plat_post_render()
 		}
 		s_last = now;
 		NxVita::DrawDebugHud( s_ms, 0, 0 );
+#ifdef PORTMASTER
+		if( diag ) VLOG( "CRASH", "post-render: HUD complete" );
+#endif
 	}
 
 	// L'ecran de chargement se repeint a CHAQUE frame, juste avant la
 	// presentation : il doit couvrir ce que le moteur vient de rendre, pas
 	// l'inverse. Ne fait rien si aucun chargement n'est en cours.
 	VitaDessineEcranChargementSiActif();
+#ifdef PORTMASTER
+	if( diag ) VLOG( "CRASH", "post-render: loading overlay complete" );
+#endif
 
 	// Mesure periodique du temps d'image. Sans elle, « ca rame » n'est qu'une
 	// impression : on ne peut ni comparer deux versions, ni savoir si une
@@ -868,7 +913,13 @@ void	CEngine::s_plat_post_render()
 	// corrigee, comparable a xemu -- et avant la presentation.
 	NxVita::OmbreVueCarte();		// "omb 2/3" : carte en coin d'ecran
 	NxVita::GammaImageFin();
+#ifdef PORTMASTER
+	if( diag ) VLOG( "CRASH", "post-render: gamma complete" );
+#endif
 	ACC( ACC_GAMMA );
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 9;
+#endif
 
 	vita_dbgsrv_frame();
 #ifndef THUG_RELEASE
@@ -885,7 +936,13 @@ void	CEngine::s_plat_post_render()
 	}
 	ACC( ACC_DBG );
 	vglSwapBuffers( GL_FALSE );
+#ifdef PORTMASTER
+	if( diag ) VLOG( "CRASH", "post-render: swap complete" );
+#endif
 	ACC( ACC_SWAP );
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 10;
+#endif
 	acc_bilan();
 	g_vita_image_ouverte = false;	// #48
 	vita_glspy_ouverte = 0;
@@ -894,10 +951,16 @@ void	CEngine::s_plat_post_render()
 
 void	CEngine::s_plat_render_world()
 {
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 2;
+#endif
 	vita_glspy_phase = 2;
 	ACC( ACC_MONDE0 );
 	VITA_STUB();
 	NxVita::RenderWorld();
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 3;
+#endif
 	NxVita::VitaMondeEtape( NxVita::MW_PART_A );		// issue #69 : decoupe du poste monde
 
 	// Particules parametriques, apres les translucides du monde et avant les
@@ -908,9 +971,21 @@ void	CEngine::s_plat_render_world()
 	// Anciennes particules (CParticle : sang, etincelles, eclaboussures)
 	// d'abord : XBox/p_nx.cpp:393 appelle render_particles() avant les
 	// nouvelles. Toujours appele (logique d'emission), dessin si "prs 1".
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 31;
+#endif
 	NxVita::RenderParticulesAnciennes();
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 4;
+#endif
 	NxVita::VitaMondeEtape( NxVita::MW_PART_N );
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 41;
+#endif
 	static_cast< CVitaNewParticleManager * >( mp_particle_manager )->RenderVita();
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 5;
+#endif
 	NxVita::VitaMondeEtape( NxVita::MW_REPORTES );
 
 	// LE DECOR EST POSE : on dessine maintenant les morceaux translucides des
@@ -919,7 +994,13 @@ void	CEngine::s_plat_render_world()
 	// la cause au lieu de la compenser : un morceau translucide n'a plus
 	// besoin d'ecrire la profondeur pour ne pas etre recouvert, donc il ne
 	// masque plus le decor la ou il est transparent.
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 51;
+#endif
 	VitaDessinerModelesReportes();
+#ifdef PORTMASTER
+	g_portmaster_crash_stage = 6;
+#endif
 	NxVita::VitaMondeFin();
 	ACC( ACC_MONDE );
 }
@@ -1403,7 +1484,11 @@ bool g_vita_fond_violet = false;
 // Cadence courante, lue par le menu VITA OPTIONS et ecrite dans controls.txt
 // (cle "framerate", Sys/SIO/Vita/p_siodev.cpp). 60 = reglage de vitaGL au
 // demarrage (vsync_interval = 1, vgl.c).
+#ifdef PORTMASTER
+int g_vita_cadence = 30;
+#else
 int g_vita_cadence = 60;
+#endif
 
 void FixerCadence( int images_par_seconde )
 {
