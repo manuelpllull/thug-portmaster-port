@@ -1,6 +1,6 @@
 # Tony Hawk's Underground on PortMaster
 
-32-bit ARM (armhf) build for PortMaster handhelds, made and tested on the R36S (RK3326, 640x480, 1 GB).
+32-bit ARM (armhf) build for PortMaster handhelds, made and tested on the R36S (RK3326, 640x480, 1 GB) and the RG34XX (H700, 720x480, Knulli).
 The picture fills any screen shape without stretching: wider screens show more to the sides, taller ones
 more above and below; the HUD and menus stay 4:3 in the middle, with menu backgrounds mirrored outwards.
 The player-facing README, `port.json`, `gameinfo.xml` and screenshot are in `port/`; `THUG.sh` is the launcher.
@@ -8,9 +8,12 @@ The player-facing README, `port.json`, `gameinfo.xml` and screenshot are in `por
 ## Installing
 
 1. Install the release zip (`thug.zip`) through PortMaster's `autoinstall` folder, or extract it into `ports/`.
-2. Extract your **USA Xbox** disc image with `extract-xiso -x "Tony Hawk's Underground (USA).iso"` and copy
-   what it produces into `ports/thug/gamedata/`, so that `ports/thug/gamedata/data/pre/qb.prx` exists.
-3. Start **THUG** from the Ports menu. The log is `ports/thug/log.txt`; saves are in `ports/thug/save/`.
+2. Copy your **Xbox** disc image (`.iso`) into `ports/thug/gamedata/`. The first launch extracts it there
+   through PortMaster's patcher (`installer/patchscript` and `installer/xiso_extract.py`, Python 3 stdlib;
+   redump and trimmed images). Without `python3`, extract it with `extract-xiso -x` on a computer and copy
+   what it produces there instead, so that `ports/thug/gamedata/data/pre/qb.prx` exists.
+3. Start **Tony Hawk's Underground** from the Ports menu. The log is `ports/thug/log.txt`; saves are in
+   `ports/thug/save/`.
 
 ## Switches
 
