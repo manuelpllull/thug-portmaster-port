@@ -28,6 +28,7 @@ Optional `ports/thug/thug.cfg`, one `VAR=value` per line, read by the launcher:
 | `THUG_RENDER_HEIGHT` | 480 | most lines the game renders; the presenter scales to the screen (raise on fast devices; **lower, e.g. 360, on a GPU-bound one** such as the RG34XX at 720x480: fewer pixels, softer picture, never a default) |
 | `THUG_WINDOW_SIZE` | screen | `WxH` window size, for desktop tests |
 | `THUG_FPS_METER` | 0 | FPS meter shown at start |
+| `THUG_BTN_OLLIE`, `THUG_BTN_GRAB`, `THUG_BTN_FLIP`, `THUG_BTN_GRIND` | b, a, y, x | face button label (`a`, `b`, `x` or `y`) for each action; PortMaster maps pads by label, so this is the same on every device. `a`, `b`, `x`, `y` = the positional map of earlier builds |
 | `THUG_PERF` | 0 | frame timing lines in the log |
 | `THUG_PROFILE` | 0 | sampling profiler, written at exit |
 | `THUG_VERBOSE` | 0 | engine tracing |

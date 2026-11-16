@@ -1,0 +1,7 @@
+Put your USA Xbox disc image of Tony Hawk's Underground (.iso) in this folder.
+
+The first launch extracts it here; that takes several minutes and needs about
+3.5 GB free. You can delete the .iso afterwards.
+
+Already extracted it on a computer with extract-xiso? Copy what it produced
+into this folder instead, so that data/pre/qb.prx is here.

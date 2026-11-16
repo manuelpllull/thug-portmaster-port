@@ -40,6 +40,15 @@ def main():
         shutil.copyfile(here / "port" / name, top / name)
     (top / "THUG.sh").write_bytes((here / "THUG.sh").read_bytes().replace(b"\r\n", b"\n"))
 
+    # gamedata/ ships with a note in it, so the folder exists for the player's disc image.
+    (inner / "gamedata").mkdir()
+    (inner / "gamedata" / "README.txt").write_bytes((here / "gamedata.txt").read_bytes().replace(b"\r\n", b"\n"))
+
+    # The first run's install from a disc image (installer/), run by PortMaster's patcher.
+    (inner / "tools").mkdir()
+    for name in ("patchscript", "xiso_extract.py"):
+        (inner / "tools" / name).write_bytes((here / "installer" / name).read_bytes().replace(b"\r\n", b"\n"))
+
     binary = args.binary.read_bytes()
     check_armhf(parser, args.binary, binary)
     (inner / "thug.armhf").write_bytes(binary)

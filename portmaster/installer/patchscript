@@ -1,0 +1,26 @@
+#!/bin/bash
+# The first run's install: extracts the disc image in ports/thug/gamedata
+# into that folder with tools/xiso_extract.py. PortMaster's patcher runs this
+# and shows its output, which goes to patchlog.txt as well.
+
+set -o pipefail
+
+GAMEDIR="${GAMEDIR:-$PWD}"
+cd "$GAMEDIR" || exit 1
+
+fail() {
+  echo "PATCH_FAIL_MSG:$1"
+  echo "$1"
+  echo "Patching process failed!"
+  exit 1
+}
+
+{
+  PYTHON=$(command -v python3)
+  [ -n "$PYTHON" ] || fail "This firmware has no python3. Extract the disc image on a computer instead (README)."
+  [ -f "${THUG_ISO:-}" ] || fail "There is no disc image (.iso) in ports/thug/gamedata."
+  echo "Extracting $(basename "$THUG_ISO")"
+  "$PYTHON" -u -I "$GAMEDIR/tools/xiso_extract.py" "$THUG_ISO" "$GAMEDIR/gamedata" 2>&1 \
+    || fail "The extraction failed. See ports/thug/patchlog.txt."
+  echo "You can delete $(basename "$THUG_ISO") now to free space."
+} | tee "$GAMEDIR/patchlog.txt"

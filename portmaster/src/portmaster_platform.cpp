@@ -901,6 +901,56 @@ int sceCtrlSetSamplingModeExt(int mode)
     return 0;
 }
 
+// Face buttons by label. PortMaster maps every pad by its printed labels, so
+// SDL's A/B/X/Y are the buttons labeled A/B/X/Y on any device. Each action is
+// one label, set in thug.cfg: THUG_BTN_OLLIE, THUG_BTN_GRAB, THUG_BTN_FLIP,
+// THUG_BTN_GRIND = a, b, x or y. Defaults: ollie B, grab A, flip Y, grind X.
+// a, b, x, y gives the positional map of earlier builds.
+struct FaceButton {
+    SDL_GameControllerButton sdl;
+    unsigned int sce;
+};
+
+static SDL_GameControllerButton face_label(const char *var, SDL_GameControllerButton def)
+{
+    const char *v = getenv(var);
+    if (!v || !*v) return def;
+    switch (v[0] | 0x20) {
+    case 'a': return SDL_CONTROLLER_BUTTON_A;
+    case 'b': return SDL_CONTROLLER_BUTTON_B;
+    case 'x': return SDL_CONTROLLER_BUTTON_X;
+    case 'y': return SDL_CONTROLLER_BUTTON_Y;
+    }
+    printf("[PAD] %s=%s is not a, b, x or y: using the default\n", var, v);
+    return def;
+}
+
+static const FaceButton *face_buttons_init(FaceButton *t)
+{
+    static const char kName[] = "ABXY";
+    t[0] = { face_label("THUG_BTN_OLLIE", SDL_CONTROLLER_BUTTON_B), SCE_CTRL_CROSS };
+    t[1] = { face_label("THUG_BTN_GRAB",  SDL_CONTROLLER_BUTTON_A), SCE_CTRL_CIRCLE };
+    t[2] = { face_label("THUG_BTN_FLIP",  SDL_CONTROLLER_BUTTON_Y), SCE_CTRL_SQUARE };
+    t[3] = { face_label("THUG_BTN_GRIND", SDL_CONTROLLER_BUTTON_X), SCE_CTRL_TRIANGLE };
+    printf("[PAD] face buttons by label: ollie=%c grab=%c flip=%c grind=%c\n",
+           kName[t[0].sdl], kName[t[1].sdl], kName[t[2].sdl], kName[t[3].sdl]);
+    return t;
+}
+
+struct FaceButtons {
+    FaceButton t[4];
+    const FaceButton *begin() const { return t; }
+    const FaceButton *end() const { return t + 4; }
+};
+
+static const FaceButtons &face_buttons()
+{
+    static FaceButtons s;
+    static const bool s_init = (face_buttons_init(s.t), true);
+    (void)s_init;
+    return s;
+}
+
 int sceCtrlPeekBufferPositive(int port, SceCtrlData *pad, int count)
 {
     return sceCtrlPeekBufferPositiveExt2(port, pad, count);
@@ -923,12 +973,8 @@ int sceCtrlPeekBufferPositiveExt2(int port, SceCtrlData *pad, int count)
     if (gc)
     {
         unsigned int b = 0;
-        // SDL face buttons are positional: south/east/west/north. On the
-        // R36S those positions are labeled B/A/Y/X, matching PS2 Cross/Circle/Square/Triangle.
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))              b |= SCE_CTRL_CROSS;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))              b |= SCE_CTRL_CIRCLE;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))              b |= SCE_CTRL_SQUARE;
-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))              b |= SCE_CTRL_TRIANGLE;
+        for (const FaceButton &f : face_buttons())
+            if (SDL_GameControllerGetButton(gc, f.sdl))                            b |= f.sce;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))   b |= SCE_CTRL_L1;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))  b |= SCE_CTRL_R1;
         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))          b |= SCE_CTRL_START;
